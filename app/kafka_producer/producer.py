@@ -1,5 +1,7 @@
 from kafka import KafkaProducer
 import json
+from config import KAFKA_BOOTSTRAP_SERVERS
+
 
 def value_serializer(v):
 	return json.dumps(v).encode('utf-8')
