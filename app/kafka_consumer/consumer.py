@@ -11,4 +11,9 @@ consumer=KafkaConsumer(
 	value_deserializer=value_deserializer,
 	group_id='second-brain-workers',
 	auto_offset_reset='earliest'
-	)	
+	)
+
+for message in consumer:
+	event=message.value
+
+	print("Received Event: ",event)		
