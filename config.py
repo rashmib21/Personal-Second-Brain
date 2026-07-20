@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 #Load variables from .env file
 load_dotenv()
 
-WATCHED_FOLDER=os.getenv("WATCHED_FOLDER","./watched_files")
+WATCHED_FOLDER=os.getenv("WATCHED_FOLDER","./watched_folder")
 LOG_LEVEL=os.getenv("LOG_LEVEL","INFO")
 
 KAFKA_BOOTSTRAP_SERVERS=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
