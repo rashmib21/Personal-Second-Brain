@@ -3,7 +3,11 @@
 from watchdog.events import FileSystemEventHandler #react for file modify, create, delete
 from watchdog.observers import Observer #watch a folder continously
 import time
-from config.py import *
+from config import *
+import os
+
+# print("WATCHED_FOLDER =", WATCHED_FOLDER)
+# print("Exists =", os.path.exists(WATCHED_FOLDER))
 
 class SecondBrainHandler(FileSystemEventHandler):
 	def on_created(self, event):
@@ -19,13 +23,14 @@ observer=Observer() #security guard, watching the folder
 handler=SecondBrainHandler() #handler reacting on that event
 
 #observer watch this folder and something happens, call the handler
-observer.schedule(handler, "WATCHED_FOLDER")
+observer.schedule(handler, WATCHED_FOLDER,recursive=True)
+
 
 observer.start() #start watching
 
 try:
 	while True:
-	time.sleep(1):
+		time.sleep(1)
 
 except KeyboardInterrupt:
 	observer.stop()
