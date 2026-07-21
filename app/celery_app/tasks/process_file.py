@@ -9,5 +9,10 @@ logger=logging.getLogger(__name__)
 
 
 def process_file(self, path):
-	logger.info(f"Processing {path}")
+	logger.info(f"Started Processing {path}")
+
+	#long running task
+	time.sleep(30)
+	logger.info(f"Finished Processing {path}")
+	
 	return {"path":path, "status":"processed"}
