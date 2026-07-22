@@ -9,3 +9,10 @@ app=Celery(
 
 app.conf.task_acks_late=True #the broker marks as Done after the tasks finishes
 app.conf.task_reject_on_worker_lost=True  #if worker fails tasks goes back to the redis queue
+
+
+# import app.celery_app.tasks.process_file
+
+app.conf.imports=(
+	"app.celery_app.tasks.process_file",
+	)
