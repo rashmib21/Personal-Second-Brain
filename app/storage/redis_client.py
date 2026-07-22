@@ -7,6 +7,8 @@ from redis.commands.search.field import VectorField, TextField #(the paramaters 
 from redis.commands.search.indexDefinition import(IndexDefinition, IndexType)
 #only build index for keys beginning with chunks, IndexType is used for storing HASH value in key pair -path, file_type, text, embeddings etc
 
+from config import REDIS_HOST, REDIS_PORT
+
 #Connect to redis
 r=redis.Redis(
 	host=REDIS_HOST,
@@ -28,5 +30,25 @@ def create_index(dim=384): #every embedding model return vector of fixed length
 		),
 	)  
 
-	
+#Create an index named "idx:files"
+r.ft("idx:files").create_index(
+
+	#Fields to index
+	schema,
+
+	#Tell Redis which keys beginning with "chunks:"
+	definition=IndexDefinition(
+
+		#Only index keys beginning with chunks
+		prefix=['chunk:'],
+
+		#Those keys are stored as Redis HASHes
+		index_type=IndexType.HASH,
+		),
+	)
+
+	print("RediSearch index created successfully!")
+
+if __name__=='__main__':
+	create_index()			
 
