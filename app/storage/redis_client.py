@@ -15,5 +15,18 @@ r=redis.Redis(
 
 #Initialize a function for creating index
 def create_index(dim=384): #every embedding model return vector of fixed length
-	schema=() #describe what every documents look like
+	schema=( #describe what every documents look like
+		TextField('path')
+		TextField('file_type')
+		VectorField('embeddings', #Name of field
+			'HNSW', #HNSW make fast searching- nearest to destination,
+			{
+				"TYPE":"FLOAT32", #Vector data type
+				"DIM":dem, #Number of values in each vector
+				"DISTANCE_METRIC":"COSINE" #Comapre vectors using cosine similarity
+			},
+		),
+	)  
+
+	
 
