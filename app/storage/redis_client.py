@@ -10,4 +10,10 @@ from redis.commands.search.indexDefinition import(IndexDefinition, IndexType)
 #Connect to redis
 r=redis.Redis(
 	host=REDIS_HOST,
-	port=REDIS_PORT) #this creates connection with redis server
+	port=REDIS_PORT) #this creates connection python with redis server
+
+
+#Initialize a function for creating index
+def create_index(dim=384): #every embedding model return vector of fixed length
+	schema=() #describe what every documents look like
+
