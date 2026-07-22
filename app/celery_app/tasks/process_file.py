@@ -1,4 +1,4 @@
-from celery_app.celery import app
+from app.celery_app.celery import app
 import logging
 import time
 
@@ -14,5 +14,5 @@ def process_file(self, path):
 	#long running task
 	time.sleep(30)
 	logger.info(f"Finished Processing {path}")
-	
+
 	return {"path":path, "status":"processed"}
