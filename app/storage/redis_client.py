@@ -4,7 +4,7 @@ import redis
 from redis.commands.search.field import VectorField, TextField #(the paramaters are path, file type, embedding-vector - the first two is text and third one is vector)
 #redis perform semantic search on vector
 
-from redis.commands.search.indexDefinition import(IndexDefinition, IndexType)
+from redis.commands.search.index_definition import(IndexDefinition, IndexType)
 #only build index for keys beginning with chunks, IndexType is used for storing HASH value in key pair -path, file_type, text, embeddings etc
 
 from config import REDIS_HOST, REDIS_PORT
@@ -18,35 +18,34 @@ r=redis.Redis(
 #Initialize a function for creating index
 def create_index(dim=384): #every embedding model return vector of fixed length
 	schema=( #describe what every documents look like
-		TextField('path')
-		TextField('file_type')
+		TextField('path'),
+		TextField('file_type'),
 		VectorField('embeddings', #Name of field
 			'HNSW', #HNSW make fast searching- nearest to destination,
 			{
 				"TYPE":"FLOAT32", #Vector data type
-				"DIM":dem, #Number of values in each vector
+				"DIM":dim, #Number of values in each vector
 				"DISTANCE_METRIC":"COSINE" #Comapre vectors using cosine similarity
 			},
 		),
 	)  
 
-#Create an index named "idx:files"
-r.ft("idx:files").create_index(
+	#Create an index named "idx:files"
+	r.ft("idx:files").create_index(
 
-	#Fields to index
-	schema,
+		#Fields to index
+		schema,
 
-	#Tell Redis which keys beginning with "chunks:"
-	definition=IndexDefinition(
+		#Tell Redis which keys beginning with "chunks:"
+		definition=IndexDefinition(
 
-		#Only index keys beginning with chunks
-		prefix=['chunk:'],
+			#Only index keys beginning with chunks
+			prefix=['chunk:'],
 
-		#Those keys are stored as Redis HASHes
-		index_type=IndexType.HASH,
-		),
-	)
-
+			#Those keys are stored as Redis HASHes
+			index_type=IndexType.HASH,
+			),
+		)
 	print("RediSearch index created successfully!")
 
 if __name__=='__main__':
