@@ -5,6 +5,7 @@ from watchdog.observers import Observer #watch a folder continously
 import time
 from config import *
 import os
+from app.celery_app.tasks.process_file import process_file
 
 # print("WATCHED_FOLDER =", WATCHED_FOLDER)
 # print("Exists =", os.path.exists(WATCHED_FOLDER))
@@ -13,6 +14,8 @@ class SecondBrainHandler(FileSystemEventHandler):
 	def on_created(self, event):
 		if not event.is_directory: 
 			print(f"A new file is created: {event.src_path}")
+			process_file.delay(event.src_path)
+			print("Task sent to Celery.")
 
 	def on_modified(self, event):
 		if not event.is_directory:
