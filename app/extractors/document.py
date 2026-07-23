@@ -2,6 +2,7 @@ import pdfplumber #copying text from pdf
 import pytesseract #scan a paper and make pdf, pytesseract performs OCR 
 from pdf2image import convert_from_path #OCR can't work directly on a pdf
 
+from app.chunker.chunker import chunk_text
 
 def extract_text(path):
 	#Read a pdf file and return all its text, if the pdf contains a real text layer, use pdfplumber
@@ -39,4 +40,14 @@ def extract_text(path):
 	return ocr_text
 
 if __name__=="__main__":
-				
+	file_path="watched_folder/Rashmi_Barethiya_19-05.pdf"
+
+	text=extract_text(file_path)
+	# print(text)
+	chunks=chunk_text(text)
+	print(f"Total chunks: {len(chunks)}")
+
+	for i, chunk in enumerate(chunks, start=1):
+		print(f"\n\n\n\n\n-----Chunks {i}-----")
+		print(chunk)
+
