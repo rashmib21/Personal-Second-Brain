@@ -1,4 +1,4 @@
-def extract_text(path):
+def extract_txt(path):
 
 	#extract text from a plain text .txt file
 	#open the file
