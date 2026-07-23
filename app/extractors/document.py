@@ -19,3 +19,24 @@ def extract_text(path):
 
 			#Add it to the final result
 			text=text+ page_text + "\n"
+	#If we successfully extracted text, no need for OCR
+	if text.strip():
+		return text
+
+	#Convert scanned pdf into images
+	images=convert_from_path(path)		
+
+	#Store OCR output
+	ocr_text=""
+
+	#Read every page image
+	for image in images:
+
+		#Extract text using OCR
+		page_text=pytesseract.image_to_string(image)
+
+		ocr_text=ocr_text+page_text+"\n"
+	return ocr_text
+
+if __name__=="__main__":
+				
