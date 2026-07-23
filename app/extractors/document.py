@@ -2,6 +2,7 @@ import os
 from app.extractors.pdf import extract_pdf
 from app.extractors.text import extract_txt
 from app.extractors.docx import extract_docx
+from app.extractors.spreadsheet import extract_spreadsheet
 def extract_text(path):
 	#Detect file extension and call the correct extractor
 	#Split filename and extension
@@ -18,5 +19,9 @@ def extract_text(path):
 		return extract_txt(path)	
 	elif extension in [".docx", ".doc"]:
 		return extract_docx(path)
-			
+	elif extension in [".csv", ".xlsx", ".xls", ".ods"]:
+		return extract_spreadsheet(path)
+		
+	
+
 	raise ValueError(f"Unsupported file type: {extension}")	
