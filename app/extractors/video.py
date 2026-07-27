@@ -21,4 +21,22 @@ def extract_keyframes(path, interval_sec=8):
 	frame_number=0
 	keyframes=[]
 
-	
+
+	while video.isOpened():
+
+		success, frame=video.read()
+
+		if not success:
+			break
+
+		if frame_number	% frame_gap==0:
+			frame_name=(os.path.splitext(path)[0]+f"_frame_{frame_name}.jpg")
+
+			cv2.imwrite(frame_name,frame)
+
+			keyframes.append(frame_name)
+		frame_number=frame_number+1
+		
+	video.release()
+
+	return keyframes		
