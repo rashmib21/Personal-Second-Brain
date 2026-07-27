@@ -14,4 +14,11 @@ def extract_keyframes(path, interval_sec=8):
 
 	#Frames per second
 	fps=video.get(cv2.CAP_PROP_FPS)
+
+	#Number of frames to skip
+	frame_gap=int(fps*interval_sec)
+
+	frame_number=0
+	keyframes=[]
+
 	
