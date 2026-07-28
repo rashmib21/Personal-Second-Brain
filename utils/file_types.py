@@ -32,4 +32,23 @@ FILE_TYPES = {
     ".mov": "video",
     ".mkv": "video",
     ".webm": "video",
+
+    # Spreadsheets
+    ".csv": "spreadsheet",
+    ".xls": "spreadsheet",
+    ".xlsx": "spreadsheet",
+
+    # Presentations
+    ".ppt": "presentation",
+    ".pptx": "presentation",
+
+    # Markdown
+    ".md": "markdown",
+
+    # Archives
+    ".zip": "archive",
+    ".rar": "archive",
+    ".7z": "archive",
+    ".tar": "archive",
+    ".gz": "archive",
 }
