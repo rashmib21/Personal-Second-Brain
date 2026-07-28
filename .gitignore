@@ -1,2 +1,22 @@
 .env
 .venv/
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+
+# Environment
+.env
+
+# Testing files
+watched_folder/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
