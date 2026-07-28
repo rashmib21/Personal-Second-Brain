@@ -72,7 +72,7 @@ def extract_video(path):
 
 #Testing
 if __name__=="__main__":
-	file_path="watched_folder/sample1.mp4"
+	file_path="watched_folder/sample2.mp4"
 	result=extract_video(file_path)
 
 	print("\n------Transcript------\n")
