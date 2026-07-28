@@ -1,45 +1,89 @@
 from app.celery_app.celery import app
 import logging
-import time
-import os
 
-from app.extractors.document import extract_text
+from app.extractors.pdf import extract_pdf
+from app.extractors.document import extract_document
+from app.extractors.text import extract_text
+from app.extractors.image import extract_image
+from app.extractors.audio import extract_audio
+from app.extractors.video import extract_video
+
 from app.chunker.chunker import chunk_text
 
 
-logger=logging.getLogger(__name__)
-
-#retry_backoff=celery waits for sometime before retry after failure
-@app.task(bind=True, autoretry_for=(Exception,),retry_backoff=True, retry_kwargs={"max_retries":3})
+logger = logging.getLogger(__name__)
 
 
-def process_file(self, path):
+# Maps each file type to its extractor
+TASKS = {
+    "pdf": extract_pdf,
+    "document": extract_document,
+    "text": extract_text,
+    "image": extract_image,
+    "audio": extract_audio,
+    "video": extract_video,
+}
 
-	file_name=os.path.basename(path)
-	print(f"*****{file_name}*****")
 
-	logger.info(f"Started Processing {path}")
+@app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+)
+def route_file(self, event):
 
-	#Step 1: Extract text from the document
-	text=extract_text(path)
+    # Get information from the Kafka event
+    path = event["path"]
+    file_type = event["file_type"]
 
-	logger.info("Text extracted successfully")
+    logger.info(f"Started processing : {path}")
 
-	#Step 2: Split text into chunks
-	chunks=chunk_text(text)
+    # Find the correct extractor
+    processor = TASKS.get(file_type)
 
-	logger.info(f"Created {len(chunks)} chunks")
+    if processor is None:
+        raise ValueError(f"Unsupported file type : {file_type}")
 
-	#print chunks temporarily
-	for i, chunk in enumerate(chunks, start=1):
-		logger.info(f"Chunk {i}:\n{chunk}\n")
+    # Extract content
+    extracted_data = processor(path)
 
-	#long running task
-	# time.sleep(30)
-	logger.info(f"Finished Processing {path}")
+    # Video returns transcript + keyframes
+    if file_type == "video":
 
-	return {
-		"path":path, 
-		"total_chunks":len(chunks), 
-		"status":"processed"
-	}
+        transcript = extracted_data["transcript"]
+        keyframes = extracted_data["keyframes"]
+
+        chunks = chunk_text(transcript)
+
+        logger.info(f"Extracted {len(keyframes)} keyframes")
+
+    # Image returns OCR text
+    elif file_type == "image":
+
+        chunks = chunk_text(extracted_data)
+
+    # Audio returns transcript
+    elif file_type == "audio":
+
+        chunks = chunk_text(extracted_data)
+
+    # PDF / Document / Text return plain text
+    else:
+
+        chunks = chunk_text(extracted_data)
+
+    logger.info(f"Created {len(chunks)} chunks")
+
+    # Print chunks temporarily
+    for i, chunk in enumerate(chunks, start=1):
+        logger.info(f"Chunk {i}:\n{chunk}\n")
+
+    logger.info(f"Finished processing : {path}")
+
+    return {
+        "path": path,
+        "file_type": file_type,
+        "total_chunks": len(chunks),
+        "status": "processed",
+    }
