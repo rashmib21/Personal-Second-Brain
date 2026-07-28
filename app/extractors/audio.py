@@ -1,20 +1,22 @@
-import whisper
+# import whisper
+from faster_whisper import WhisperModel
 
 #Load the whisper model once when this module is imported
-whisper_model=whisper.load_model("base")
+model=WhisperModel(
+	"medium",
+	device="cpu", 
+	compute_type="int8")
 
 def extract_audio(path):
-	
-	#Transcribe the audio
-	result=whisper_model.transcribe(path, fp16=False,
-    verbose=True)
-	print(result["language"])
-	print(result["text"])
 
+	segments, info=model.transcribe(path)
+	print(f"Detected language: {info.language}")
 
-
-	#Return only the text
-	return result['text']
+	text=''
+	for segment in segments:
+		text=text+segment.text+" "
+	return text.strip()
+		
 
 #Testing
 if __name__=='__main__':
