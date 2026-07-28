@@ -1,63 +1,74 @@
 from kafka import KafkaConsumer
 import json
 import os
+
 from config import KAFKA_BOOTSTRAP_SERVERS
 from app.utils.file_types import FILE_TYPES
 
-def value_deserializer(v):
-	return json.loads(v.decode("utf-8"))
+# Celery Router
+from app.celery_app.router import route_file
 
-consumer=KafkaConsumer(
-	'file-events',
-	bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-	value_deserializer=value_deserializer,
-	group_id='second-brain-workers',
-	auto_offset_reset='earliest'
-	)
+
+def value_deserializer(value):
+    # Convert Kafka bytes into a Python dictionary
+
+    return json.loads(value.decode("utf-8"))
+
+
+consumer = KafkaConsumer(
+    "file-events",
+    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+    value_deserializer=value_deserializer,
+    group_id="second-brain-workers",
+    auto_offset_reset="earliest",
+)
 
 print("Consumer started... Waiting for events...\n")
 
-#Listen continously for new events
+
+# Listen continuously for new events
 for message in consumer:
-	event=message.value
 
-	print("="*60)
-	print("Received Event: ",event)		
+    event = message.value
 
-	#Validate event contains path
-	if "path" not in event:
-		print("Invalid event. Missing 'path'")
-		continue
-	path=event['path']
-	
+    print("=" * 70)
+    print("Received Event:")
+    print(event)
 
-	#Check whether file actually exists
-	if not os.path.exists(path):
-		print(f"File not found: {path}")	
-		continue
+    # Validate Event
+    if "path" not in event:
+        print("Invalid event. Missing 'path'")
+        continue
 
-	#Determine the file extension
-	file_type=FILE_TYPES.get(extension)
+    path = event["path"]
 
-	if file_type is None:
-		print(f"Unsupported file type: {extension}")
-		continue	
+    # Check whether the file exists
 
-	#Add useful metadata to event
-	event['extension']=extension
-	event['file_type']=file_type
-	event['file_size']=os.path.getsize(path)
+    if not os.path.exists(path):
+        print(f"File not found: {path}")
+        continue
 
-	#Print final validated event
-	print("\nValidated event: ")
-	print(event)
+    # Determine file extension
+    extension = os.path.splitext(path)[1].lower()
 
-	# TASKS = {
-	#     "pdf": process_pdf,
-	#     "document": process_document,
-	#     "text": process_text,
-	#     "image": process_image,
-	#     "audio": process_audio,
-	#     "video": process_video,
-	# }
+    # Determine file type
+    file_type = FILE_TYPES.get(extension)
 
+    if file_type is None:
+        print(f"Unsupported file type: {extension}")
+        continue
+
+    # Add useful metadata
+    event["extension"] = extension
+    event["file_type"] = file_type
+    event["file_size"] = os.path.getsize(path)
+
+    # Validated Event
+    print("\nValidated Event:")
+    print(event)
+
+    # Send to Celery
+
+    route_file.delay(event)
+
+    print(f"\nTask submitted to Celery ({file_type})")
