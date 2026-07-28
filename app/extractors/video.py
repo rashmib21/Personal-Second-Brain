@@ -1,11 +1,8 @@
 import subprocess #-run ffmpeg
-# import whisper  #convert speech to text
 import os
 import cv2
 
 from app.extractors.audio import extract_audio
-
-# whisper_model=whisper.load_model('base')
 
 def extract_keyframes(path, interval_sec=8):
 	
@@ -19,8 +16,8 @@ def extract_keyframes(path, interval_sec=8):
 	frame_gap=int(fps*interval_sec)
 
 	frame_number=0
-	keyframes=[]
 
+	keyframes=[]
 
 	while video.isOpened():
 
@@ -29,12 +26,14 @@ def extract_keyframes(path, interval_sec=8):
 		if not success:
 			break
 
+		# Save one frame every `interval_sec`
 		if frame_number	% frame_gap==0:
 			frame_name=(os.path.splitext(path)[0]+f"_frame_{frame_number}.jpg")
 
 			cv2.imwrite(frame_name,frame)
 
 			keyframes.append(frame_name)
+
 		frame_number=frame_number+1
 
 	video.release()
@@ -65,6 +64,7 @@ def extract_video(path):
 	#Extract keyframes
 	keyframes=extract_keyframes(path)
 
+	#Return extracted data
 	return {
 		"transcript":transcript,
 		"keyframes":keyframes,
