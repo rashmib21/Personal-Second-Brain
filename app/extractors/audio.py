@@ -5,7 +5,7 @@ def extract_audio(path):
 	# Transcribe audio
     result = transcribe_audio(path)
 
-    
+
 
     # Print detected language
     print(f"Detected language: {result['language']}")
@@ -21,6 +21,6 @@ def extract_audio(path):
 
 #Testing
 if __name__=='__main__':
-	file_path='watched_folder/MLKDream.mp3'
+	file_path='watched_folder/song.mp3'
 	text=extract_audio(file_path)
 	print(text)		
