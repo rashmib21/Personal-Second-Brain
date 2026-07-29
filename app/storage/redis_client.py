@@ -70,6 +70,7 @@ def store_chunk(chunk_id, path, file_type, text, embedding):
 		"embeddings":embedding,
 		},)
 
+	print(f"Stored {key} in Redis")
 
 if __name__=='__main__':
 	create_index()			
