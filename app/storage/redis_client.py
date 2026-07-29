@@ -48,7 +48,7 @@ def create_index(dim=384): #every embedding model return vector of fixed length
 		definition=IndexDefinition(
 
 			#Only index keys beginning with chunks
-			prefix=['chunks:'],
+			prefix=['chunk:'],
 
 			#Those keys are stored as Redis HASHes
 			index_type=IndexType.HASH,
