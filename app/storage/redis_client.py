@@ -1,5 +1,6 @@
 #it is mainly responsible for redisearch index that makes semantic (vector) search possible
 import redis
+import numpy
 
 from redis.commands.search.field import VectorField, TextField #(the paramaters are path, file type, embedding-vector - the first two is text and third one is vector)
 #redis perform semantic search on vector
@@ -29,9 +30,16 @@ def create_index(dim=384): #every embedding model return vector of fixed length
 			},
 		),
 	)  
+	
 
+	#ft() tells the Redis client: I want to use the RediSearch module.
 	#Create an index named "idx:files"
-	r.ft("idx:files").create_index(
+	try:
+		r.ft("idx:files").info()
+		print("Index already exists.")
+	
+	except :
+		r.ft("idx:files").create_index(
 
 		#Fields to index
 		schema,
@@ -40,13 +48,28 @@ def create_index(dim=384): #every embedding model return vector of fixed length
 		definition=IndexDefinition(
 
 			#Only index keys beginning with chunks
-			prefix=['chunk:'],
+			prefix=['chunks:'],
 
 			#Those keys are stored as Redis HASHes
 			index_type=IndexType.HASH,
 			),
 		)
 	print("RediSearch index created successfully!")
+
+def store_chunk(chunk_id, path, file_type, text, embedding):
+	#Store one chunk
+	key=f"chunk: {chunk_id}"
+
+	#numpy is used for converting the python list into bytes because redisearch only understand raw bytes and numoy knows how to convert
+	embedding=np.array(embedding, dtype=np.float32).tobytes()
+
+	r.hset(key, mapping={
+		"path":path,
+		"file_type":file_type,
+		"text":text,
+		"embeddings":embedding,
+		},)
+
 
 if __name__=='__main__':
 	create_index()			
