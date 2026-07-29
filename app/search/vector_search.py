@@ -37,3 +37,17 @@ def search(query_text, top_k=5):
 		}
 	)
 	return results.docs
+
+if __name__=="__main__":
+	query=input("Ask: ")
+	results=search(query)
+	print("\nTop Results\n")
+
+	for i, doc in enumerate(results, start=1):
+		print("="*100)
+		print(f"Result {i}")
+		print("Path: ",doc.path)
+		print("Type: ",doc.file_type)
+		print("Score: ",doc.score)
+		print("Text: ")
+		print(doc.text)	
