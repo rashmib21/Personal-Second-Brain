@@ -10,7 +10,7 @@ r=redis.Redis(
 	decode_responses=False #normally redis converts bytes into string, but embeddings are binary data, not text
 	)
 
-def write_chunk(chunk_id, path, file_type, embedding):
+def store_chunk(chunk_id, path, file_type, chunk, embedding):
 	
 	#Convert python list into numpy array
 	vector=np.array(embedding,dtype=np.float32)
@@ -20,20 +20,23 @@ def write_chunk(chunk_id, path, file_type, embedding):
 
 	#Store the chunk inside Redis
 	r.hset(
-		f"chunk: {chunk_id}",
+		f"chunk:{chunk_id}",
 		mapping={
+		"text":chunk,
 		"path":path,
 		"file_type":file_type,
-		"embedding":vector_bytes
+		"embeddings":vector_bytes
 		}
 	)
 
 	print(f"Chunk: {chunk_id} stored successfully!")
 
-if __name__=='__main__':
-	write_chunk(
-		chunk_id=1,
-		path='watched_folder/Rashmi_Barethiya_19-05',
-		file_type="pdf",
-		embedding=[0.1]*384
-		)
+#Testing
+# if __name__=='__main__':
+# 	store_chunk(
+# 		chunk_id=1,
+# 		path='watched_folder/Rashmi_Barethiya_19-05',
+# 		file_type="pdf",
+# 		chunk="My name is Rashmi Barethiya",
+# 		embedding=[0.1]*384
+# 		)
