@@ -8,6 +8,10 @@ from app.extractors.image import extract_image
 from app.extractors.audio import extract_audio
 from app.extractors.video import extract_video
 
+from app.embeddings.embedding_router import generate_embedding
+from app.storage.redis_client import store_chunk
+import uuid
+
 from app.chunker.chunker import chunk_text
 
 
@@ -15,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 # Maps each file type to its extractor
-TASKS = {
+TASKS = {   
     "pdf": extract_pdf,
     "document": extract_document,
     "text": extract_text,
@@ -75,15 +79,28 @@ def route_file(self, event):
 
     logger.info(f"Created {len(chunks)} chunks")
 
-    # Print chunks temporarily
-    for i, chunk in enumerate(chunks, start=1):
-        logger.info(f"Chunk {i}:\n{chunk}\n")
+    #Generate embeddings and store in Redis
+    for chunk in chunks:
 
-    logger.info(f"Finished processing : {path}")
+        #Unique ID for every chunk
+        chunk_id=str(uuid.uuid4())
 
+        #Convert text into vector
+        embedding=generate_embedding(file_type, chunk)
+
+        #Store metadata and vector
+        store_chunk(
+            chunk_id=chunk_id,
+            path=path,
+            file_type=file_type,
+            text=chunk,
+            embedding=embedding
+        )
+    logger.info(f"Finished processing: {path}")
+    
     return {
-        "path": path,
-        "file_type": file_type,
-        "total_chunks": len(chunks),
-        "status": "processed",
-    }
+    "path":path,
+    "file_type":file_type,
+    "total_chunks":len(chunks),
+    "status":"processed",
+    }    
