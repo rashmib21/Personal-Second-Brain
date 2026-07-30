@@ -31,4 +31,4 @@ if __name__=='__main__':
 			answer=ask_llama(user_input)
 			print("\nLlama: ", answer)
 		except Exception as e:
-			print("\nError: {e}")		
+			print(f"\nError: {e}")		
