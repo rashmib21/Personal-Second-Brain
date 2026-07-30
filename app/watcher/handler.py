@@ -5,7 +5,9 @@ from watchdog.observers import Observer #watch a folder continously
 import time
 from config import *
 import os
-from app.celery_app.tasks.process_file import process_file
+from app.celery_app.tasks.process_file import route_file
+from app.utils.hash import calculate_file_hash
+from app.storage.redis_store import is_duplicate
 
 # print("WATCHED_FOLDER =", WATCHED_FOLDER)
 # print("Exists =", os.path.exists(WATCHED_FOLDER))
@@ -13,8 +15,20 @@ from app.celery_app.tasks.process_file import process_file
 class SecondBrainHandler(FileSystemEventHandler):
 	def on_created(self, event):
 		if not event.is_directory: 
-			print(f"A new file is created: {event.src_path}")
-			process_file.delay(event.src_path)
+			path=event.src_path
+			print(f"A new file is created: {path}")
+			file_hash = calculate_file_hash(path)
+			print(file_hash)
+			# Check duplicate
+			if is_duplicate(file_hash):
+				print("Duplicate file detected. Skipping...")
+				return
+			file_type = os.path.splitext(path)[1].lower().lstrip(".")
+			route_file.delay({
+				"path":path,
+				"file_type":file_type,
+				"file_hash": file_hash
+				})
 			print("Task sent to Celery.")
 
 	def on_modified(self, event):
@@ -39,7 +53,4 @@ except KeyboardInterrupt:
 	observer.stop()
 
 observer.join()	#wait here until the observer has completely stopped
-
-
-
 
