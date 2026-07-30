@@ -15,9 +15,9 @@ def extract_image(path):
 	#return the text
 	return text	
 
-#Testing 
+# #Testing 
 
-if __name__=="__main__":
-	file_path="watched_folder/vingsfire.png"
-	text=extract_image(file_path)
-	print(text)	
+# if __name__=="__main__":
+# 	file_path="watched_folder/vingsfire.png"
+# 	text=extract_image(file_path)
+# 	print(text)	
