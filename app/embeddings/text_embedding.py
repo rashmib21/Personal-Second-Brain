@@ -2,7 +2,7 @@
 from sentence_transformers import SentenceTransformer
 
 #Load the model only once
-model=SentenceTransformer("all-MiniLM-L6-v2")
+model=SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 
 def embed_text(text):
 	#Convert text into a vector embeddings
@@ -14,11 +14,11 @@ def embed_text(text):
 
 	return embedding.tolist()
 
-#Testing
-if __name__=="__main__":
-	sample_text="watched_folder/hello.txt"
-	embedding=embed_text(sample_text)
-	print(f"Embedding Dimension: {len(embedding)}")
-	print(embedding)
-	print("*"*60)
-	print(len(set(embedding)))
+# #Testing
+# if __name__=="__main__":
+# 	sample_text="watched_folder/hello.txt"
+# 	embedding=embed_text(sample_text)
+# 	print(f"Embedding Dimension: {len(embedding)}")
+# 	print(embedding)
+# 	print("*"*60)
+# 	print(len(set(embedding)))
