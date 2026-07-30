@@ -1,11 +1,11 @@
 import numpy as np
 from redis.commands.search.query import Query
 
-from app.storage.redis_client import r
+from app.storage.redis_store import r
 from app.embeddings.embedding_router import generate_embedding
 
 def search(query_text, top_k=5):
-	#Perform semantic search in Redis using vector similarity
+	#generate user query into embeddings
 	query_embedding=generate_embedding(
 		"text",
 		query_text
@@ -18,6 +18,13 @@ def search(query_text, top_k=5):
 	).tobytes()
 
 	#KNN Vector Search
+	"""
+		* means search every document, => perform vector operation,
+		KNNtop-K return relevant closes vector,
+		@embeddings means field field contain vector, our index has embedding VECTOR, compare with this field
+		$vector use the embedding of the user's question
+
+	"""
 	query=(Query(f"*=>[KNN {top_k} @embeddings $vector AS score]"
 		)
 	.sort_by("score")
