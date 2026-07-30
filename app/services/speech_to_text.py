@@ -29,13 +29,13 @@ def transcribe_audio(audio_path):
 
 
 #Testing
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    file_path = "watched_folder/MLKDream.mp3"
+#     file_path = "watched_folder/MLKDream.mp3"
 
-    result = transcribe_audio(file_path)
+#     result = transcribe_audio(file_path)
 
-    print("=" * 70)
-    print("Language :", result["language"])
-    print("=" * 70)
-    print(result["text"])
+#     print("=" * 70)
+#     print("Language :", result["language"])
+#     print("=" * 70)
+#     print(result["text"])
