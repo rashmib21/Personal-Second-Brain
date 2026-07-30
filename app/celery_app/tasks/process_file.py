@@ -1,15 +1,16 @@
 from app.celery_app.celery import app
 import logging
 
-from app.extractors.pdf import extract_pdf
-from app.extractors.document import extract_document
-from app.extractors.text import extract_text
-from app.extractors.image import extract_image
-from app.extractors.audio import extract_audio
-from app.extractors.video import extract_video
-
+# from app.extractors.pdf import extract_pdf
+# from app.extractors.document import extract_document
+# from app.extractors.text import extract_text
+# from app.extractors.image import extract_image
+# from app.extractors.audio import extract_audio
+# from app.extractors.video import extract_video
+from app.extractors.router import extract_file
+from app.storage.redis_store import save_file_hash
 from app.embeddings.embedding_router import generate_embedding
-from app.storage.redis_client import store_chunk
+from app.storage.redis_store import store_chunk
 import uuid
 
 from app.chunker.chunker import chunk_text
@@ -17,16 +18,6 @@ from app.chunker.chunker import chunk_text
 
 logger = logging.getLogger(__name__)
 
-
-# Maps each file type to its extractor
-TASKS = {   
-    "pdf": extract_pdf,
-    "document": extract_document,
-    "text": extract_text,
-    "image": extract_image,
-    "audio": extract_audio,
-    "video": extract_video,
-}
 
 
 @app.task(
@@ -37,23 +28,20 @@ TASKS = {
 )
 def route_file(self, event):
 
+    print("EVENT RECEIVED:", event)
+    print("EVENT TYPE:", type(event))
+
     # Get information from the Kafka event
     path = event["path"]
     file_type = event["file_type"]
+    file_hash = event["file_hash"]
 
     logger.info(f"Started processing : {path}")
 
-    # Find the correct extractor
-    processor = TASKS.get(file_type)
-
-    if processor is None:
-        raise ValueError(f"Unsupported file type : {file_type}")
-
-    # Extract content
-    extracted_data = processor(path)
+    extracted_data=extract_file(path)
 
     # Video returns transcript + keyframes
-    if file_type == "video":
+    if isinstance(extracted_data, dict):
 
         transcript = extracted_data["transcript"]
         keyframes = extracted_data["keyframes"]
@@ -62,17 +50,6 @@ def route_file(self, event):
 
         logger.info(f"Extracted {len(keyframes)} keyframes")
 
-    # Image returns OCR text
-    elif file_type == "image":
-
-        chunks = chunk_text(extracted_data)
-
-    # Audio returns transcript
-    elif file_type == "audio":
-
-        chunks = chunk_text(extracted_data)
-
-    # PDF / Document / Text return plain text
     else:
 
         chunks = chunk_text(extracted_data)
@@ -96,11 +73,19 @@ def route_file(self, event):
             text=chunk,
             embedding=embedding
         )
+
+    # Mark file as processed
+
+    save_file_hash(
+        file_hash=file_hash,
+        path=path
+    )
+
     logger.info(f"Finished processing: {path}")
-    
+        
     return {
-    "path":path,
-    "file_type":file_type,
-    "total_chunks":len(chunks),
-    "status":"processed",
-    }    
+        "path":path,
+        "file_type":file_type,
+        "total_chunks":len(chunks),
+        "status":"processed",
+        }    
