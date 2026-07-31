@@ -7,6 +7,8 @@ import logging
 # from app.extractors.image import extract_image
 # from app.extractors.audio import extract_audio
 # from app.extractors.video import extract_video
+
+
 from app.extractors.router import extract_file
 from app.storage.redis_store import save_file_hash
 from app.embeddings.embedding_router import generate_embedding
