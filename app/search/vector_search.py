@@ -4,16 +4,18 @@ from redis.commands.search.query import Query
 from app.storage.redis_store import r
 from app.embeddings.embedding_router import generate_embedding
 
-def search(query_text, top_k=5):
+MAX_ALLOWED_DISTANCE = 0.5
+
+def search(question, how_many_results=5):
 	#convert user query into embeddings
-	query_embedding=generate_embedding(
+	question_vector=generate_embedding(
 		"text",
-		query_text
+		question
 	)
 
 	#Convert embedding list to bytes
-	query_vector=np.array(
-		query_embedding,
+	query_vector_bytes=np.array(
+		question_vector,
 		dtype=np.float32
 	).tobytes()
 
@@ -26,50 +28,56 @@ def search(query_text, top_k=5):
 
 	"""
 	#Build the KNN search
-	knn_query=("*=>"
-		f"[KNN {top_k} @embeddings $vector AS score]")
+	search_command=("*=>"
+		f"[KNN {how_many_results} @embeddings $vector AS distance_score]")
 
 	#create query object
-	redis_query=Query(knn_query)
+	query=Query(search_command)
 
 	#Sort by similarity score
-	redis_query=redis_query.sort_by("score")
+	query=query.sort_by("distance_score")
 
 	#Return only these fields from Redis
-	redis_query=redis_query.return_fields(
+	query=query.return_fields(
 		"path",
 		"file_type",
 		"text",
-		"score"
+		"distance_score"
 	)
 
 	#Enable Redisearch query dialect 2->it is used to enable vector search in KNN
-	redis_query=redis_query.dialect(2)
+	query=query.dialect(2)
 
 	#Execute the search
-	results=r.ft("idx:files").search(
-		redis_query,
+	search_results=r.ft("idx:files").search(
+		query,
 		{
-			"vector":query_vector
+			"vector":query_vector_bytes
 		}
 	)
+	#Only keep results that are close enough to be real matches
+	good_results=[]
+	for one_result in search_results.docs:
+		distance=float(one_result.distance_score)
+		if distance<=MAX_ALLOWED_DISTANCE:
+			good_results.append(one_result)
 
 	#Return matching documents
-	return results.docs
+	return good_results
 
 if __name__=="__main__":
-	query=input("Ask: ")
-	results=search(query)
+	question=input("Ask: ")
+	matching_chunks=search(question)
 	print("\nTop Results\n")
 
-	if not results:
+	if not matching_chunks:
 		print("No matching documents found.")
 
-	for i, doc in enumerate(results, start=1):
+	for position, chunk in enumerate(matching_chunks, start=1):
 		print("="*100)
 		print(f"Result {i}")
-		print("Path: ",doc.path)
-		print("Type: ",doc.file_type)
-		print("Score: ",doc.score)
+		print("Path: ",chunk.path)
+		print("Type: ",chunk.file_type)
+		print("Score: ",chunk.score)
 		print("Text: ")
-		print(doc.text)	
+		print(chunk.text)	

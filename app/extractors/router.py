@@ -26,7 +26,7 @@ def extract_file(path):
     ]:
         return extract_txt(path)
 
-    elif extension in [".doc", ".docx"]:
+    elif extension in [".doc", ".docx","odt"]:
         return extract_docx(path)
 
     elif extension in [".csv", ".xlsx", ".xls", ".ods"]:

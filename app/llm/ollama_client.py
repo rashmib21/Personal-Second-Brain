@@ -11,7 +11,7 @@ def ask_llama(prompt):
 			{
 				"role":"user",
 				"content":prompt,
-			}],)
+			}])
 	return response['message']['content']
 
 if __name__=='__main__':

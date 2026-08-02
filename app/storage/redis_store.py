@@ -21,6 +21,7 @@ def create_index(dim=384): #every embedding model return vector of fixed length
 	schema=( #describe what every documents look like
 		TextField('path'),
 		TextField('file_type'),
+		TextField("text"),      
 		VectorField('embeddings', #Name of field
 			'HNSW', #HNSW make fast searching- nearest to destination,
 			{
@@ -67,7 +68,7 @@ def store_chunk(chunk_id, path, file_type, text, embedding):
 		"path":path,
 		"file_type":file_type,
 		"text":text,
-		"embedding":embedding,
+		"embeddings":embedding,
 		},)
 
 	print(f"Stored {key} in Redis")
