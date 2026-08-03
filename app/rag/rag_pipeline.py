@@ -5,12 +5,14 @@ def ask(question):
 	#Search similar chunks
 	results=search(question)
 
+	if not results:
+		return "I could not find any relevant information in the indexed documents"
+
 	#Combine all retrieved text
-	context=""
+	context=[]
 
 	for doc in results:
-		context=context+doc['text']+"\n"
-		context=context+"\n\n"
+		context=context+f"Source File: {doc['path']} {doc['text']}"
 
 	#Make prompt
 	prompt=f"""
