@@ -7,7 +7,7 @@ from config import *
 import os
 from app.celery_app.tasks.process_file import route_file
 from app.utils.hash import calculate_file_hash
-from app.storage.redis_store import is_duplicate
+# from app.storage.lancedb_store import is_duplicate
 
 # print("WATCHED_FOLDER =", WATCHED_FOLDER)
 # print("Exists =", os.path.exists(WATCHED_FOLDER))
@@ -20,9 +20,9 @@ class SecondBrainHandler(FileSystemEventHandler):
 			file_hash = calculate_file_hash(path)
 			print(file_hash)
 			# Check duplicate
-			if is_duplicate(file_hash):
-				print("Duplicate file detected. Skipping...")
-				return
+			# if is_duplicate(file_hash):
+			# 	print("Duplicate file detected. Skipping...")
+			# 	return
 			file_type = os.path.splitext(path)[1].lower().lstrip(".")
 			route_file.delay({
 				"path":path,
