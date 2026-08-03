@@ -9,7 +9,7 @@ def ask(question):
 	context=""
 
 	for doc in results:
-		context=context+doc.text
+		context=context+doc['text']+"\n"
 		context=context+"\n\n"
 
 	#Make prompt
