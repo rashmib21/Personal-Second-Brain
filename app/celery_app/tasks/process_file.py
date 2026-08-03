@@ -10,7 +10,7 @@ import logging
 
 
 from app.extractors.router import extract_file
-# from app.storage.lancedb_store import save_file_hash
+from app.storage.lancedb_store import save_file_hash, is_file_processed
 from app.embeddings.embedding_router import generate_embedding
 from app.storage.lancedb_store import store_chunk
 import uuid
@@ -38,6 +38,14 @@ def route_file(self, event):
     file_type = event["file_type"]
     file_hash = event["file_hash"]
 
+    if is_file_processed(file_hash):
+        logger.info(f"Duplicate file skipped: {path}")
+
+        return {
+            "status":"duplicate",
+            "path":path
+        }    
+
     logger.info(f"Started processing : {path}")
 
     extracted_data=extract_file(path)
@@ -58,7 +66,7 @@ def route_file(self, event):
 
     logger.info(f"Created {len(chunks)} chunks")
 
-    #Generate embeddings and store in Redis
+    #Generate embeddings and store in lancedb
     for chunk in chunks:
 
         #Unique ID for every chunk
@@ -70,6 +78,7 @@ def route_file(self, event):
         #Store metadata and vector
         store_chunk(
             chunk_id=chunk_id,
+            file_hash=file_hash,
             path=path,
             file_type=file_type,
             text=chunk,
@@ -78,10 +87,10 @@ def route_file(self, event):
 
     # Mark file as processed
 
-    # save_file_hash(
-    #     file_hash=file_hash,
-    #     path=path
-    # )
+    save_file_hash(
+        file_hash=file_hash,
+        path=path
+    )
 
     logger.info(f"Finished processing: {path}")
         
