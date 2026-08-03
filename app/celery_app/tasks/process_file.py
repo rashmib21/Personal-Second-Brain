@@ -10,9 +10,9 @@ import logging
 
 
 from app.extractors.router import extract_file
-from app.storage.redis_store import save_file_hash
+# from app.storage.lancedb_store import save_file_hash
 from app.embeddings.embedding_router import generate_embedding
-from app.storage.redis_store import store_chunk
+from app.storage.lancedb_store import store_chunk
 import uuid
 
 from app.chunker.chunker import chunk_text
@@ -78,10 +78,10 @@ def route_file(self, event):
 
     # Mark file as processed
 
-    save_file_hash(
-        file_hash=file_hash,
-        path=path
-    )
+    # save_file_hash(
+    #     file_hash=file_hash,
+    #     path=path
+    # )
 
     logger.info(f"Finished processing: {path}")
         
