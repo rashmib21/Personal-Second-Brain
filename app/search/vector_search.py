@@ -2,7 +2,7 @@
 from app.storage.lancedb_store import table
 from app.embeddings.embedding_router import generate_embedding
 	
-MAX_ALLOWED_DISTANCE = 0.5
+MAX_ALLOWED_DISTANCE = 0.7
 
 def search(question, how_many_results=5):
 	#convert user query into embeddings
@@ -13,16 +13,12 @@ def search(question, how_many_results=5):
 
 	results=(table.search(question_vector).metric("cosine").limit(how_many_results).to_list())
 	
-	#Only keep results that are close enough to be real matches
-	good_results=[]
-	for one_result in results:
+	if not results:
+		return []
 
-		distance=float(one_result["_distance"])
-		if distance<=MAX_ALLOWED_DISTANCE:
-			good_results.append(one_result)
 
 	#Return matching documents
-	return good_results
+	return results
 
 if __name__=="__main__":
 	question=input("Ask: ")
@@ -38,5 +34,8 @@ if __name__=="__main__":
 		print("Path: ",chunk["path"])
 		print("Type: ",chunk["file_type"])
 		print("Score: ",chunk["_distance"])
-		print("Text: ")
-		print(chunk["text"])	
+
+		print("\nText: ")
+		print("="*100)
+		print(chunk["text"])
+		print()	
