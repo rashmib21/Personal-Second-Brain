@@ -20,7 +20,14 @@ def ask(question):
 	prompt=f"""
 		You are an AI assistant.
 
-		Answer only using the context below.
+		Use ONLY the information provided in the context below.
+
+		Rules:
+		1. Answer only from the provided context.
+		2. If the answer is not found in the context, reply:
+		   "I could not find that information in the indexed documents."
+		3. Do not make up information.
+		4. Mention the source file if possible.
 
 		Context: {context}
 
