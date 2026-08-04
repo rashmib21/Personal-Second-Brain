@@ -2,7 +2,7 @@
 from app.storage.lancedb_store import table
 from app.embeddings.embedding_router import generate_embedding
 	
-MAX_ALLOWED_DISTANCE = 0.7
+
 
 def search(question, how_many_results=5):
 	#convert user query into embeddings

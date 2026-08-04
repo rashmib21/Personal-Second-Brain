@@ -78,7 +78,6 @@ def route_file(self, event):
         #Store metadata and vector
         store_chunk(
             chunk_id=chunk_id,
-            file_hash=file_hash,
             path=path,
             file_type=file_type,
             text=chunk,
