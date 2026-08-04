@@ -12,8 +12,10 @@ def ask(question):
 	context=[]
 
 	for doc in results:
-		context=context+f"Source File: {doc['path']} {doc['text']}"
-
+		context.append(
+			f"Source File: {doc['path']} {doc['text']}")
+	context="\n\n".join(context)
+	
 	#Make prompt
 	prompt=f"""
 		You are an AI assistant.
