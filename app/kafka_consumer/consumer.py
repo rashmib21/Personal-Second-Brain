@@ -4,8 +4,7 @@ import os
 
 from config import KAFKA_BOOTSTRAP_SERVERS
 from app.utils.file_types import FILE_TYPES
-from app.celery_app.router import route_file
-
+from app.celery_app.tasks.process_file import route_file
 
 def value_deserializer(value):
     """
@@ -47,6 +46,10 @@ for message in consumer:
         print(f"File not found: {path}")
         continue
 
+    if "file_hash" not in event:
+        print("Invalid event. Missing 'file_hash'")
+        continue    
+
     # Determine extension
     extension = os.path.splitext(path)[1].lower()
 
@@ -61,7 +64,8 @@ for message in consumer:
     event["path"] = path
     event["filename"] = os.path.basename(path)
     event["extension"] = extension
-    event["file_type"] = file_type
+    if "file_type" not in event:
+        event["file_type"] = file_type
     event["file_size"] = os.path.getsize(path)
 
     # Print validated event
