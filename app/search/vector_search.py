@@ -11,6 +11,7 @@ def search(question, how_many_results=5):
 		question
 	)
 
+	#Semantic Search
 	results=(table.search(question_vector).metric("cosine").limit(how_many_results).to_list())
 	
 	if not results:
@@ -21,21 +22,23 @@ def search(question, how_many_results=5):
 	return results
 
 if __name__=="__main__":
-	question=input("Ask: ")
-	matching_chunks=search(question)
-	print("\nTop Results\n")
+	
+	while True: 
+		question=input("Ask: ")
+		matching_chunks=search(question)
+		print("\nTop Results\n")
 
-	if not matching_chunks:
-		print("No matching documents found.")
+		if not matching_chunks:
+			print("No matching documents found.")
 
-	for position, chunk in enumerate(matching_chunks, start=1):
-		print("="*100)
-		print(f"Result {position}")
-		print("Path: ",chunk["path"])
-		print("Type: ",chunk["file_type"])
-		print("Score: ",chunk["_distance"])
+		for position, chunk in enumerate(matching_chunks, start=1):
+			print("="*100)
+			print(f"Result {position}")
+			print("Path: ",chunk["path"])
+			print("Type: ",chunk["file_type"])
+			print("Score: ",chunk["_distance"])
 
-		print("\nText: ")
-		print("="*100)
-		print(chunk["text"])
-		print()	
+			print("\nText: ")
+			print("="*100)
+			print(chunk["text"])
+			print()	
