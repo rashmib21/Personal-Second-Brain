@@ -5,7 +5,8 @@ from watchdog.observers import Observer #watch a folder continously
 import time
 from config import *
 import os
-from app.celery_app.tasks.process_file import route_file
+# from app.celery_app.tasks.process_file import route_file
+from app.kafka_producer.producer import publish_file_event
 from app.utils.hash import calculate_file_hash
 # from app.storage.lancedb_store import is_duplicate
 
@@ -16,6 +17,11 @@ class SecondBrainHandler(FileSystemEventHandler):
 	def on_created(self, event):
 		if not event.is_directory: 
 			path=event.src_path
+
+			# print(repr(path))
+			# print(os.path.exists(path))
+			# print(os.path.getsize(path))
+			# print(calculate_file_hash(path))
 			print(f"A new file is created: {path}")
 			file_hash = calculate_file_hash(path)
 			print(file_hash)
@@ -24,12 +30,12 @@ class SecondBrainHandler(FileSystemEventHandler):
 			# 	print("Duplicate file detected. Skipping...")
 			# 	return
 			file_type = os.path.splitext(path)[1].lower().lstrip(".")
-			route_file.delay({
+			publish_file_event({
 				"path":path,
 				"file_type":file_type,
 				"file_hash": file_hash
 				})
-			print("Task sent to Celery.")
+			print("Published event to Kafka.")
 
 	def on_modified(self, event):
 		if not event.is_directory:
