@@ -1,10 +1,13 @@
 import lancedb
 import os
 import pyarrow as pa
+from datetime import datetime
+
 
 DB_PATH='database'
-TABLE_NAME="documents"
 
+TABLE_NAME="documents"
+HASH_TABLE_NAME="processed_files"
 
 #create database folder if it doesn't exists
 os.makedirs(DB_PATH,exist_ok=True)
@@ -31,7 +34,35 @@ def get_table():
 	return db.create_table(
 		TABLE_NAME, schema=schema)
 
-table=get_table()		
+		
+
+def get_hash_table():
+	if HASH_TABLE_NAME in db.list_tables().tables:
+		return db.open_table(HASH_TABLE_NAME)
+
+	schema=pa.schema([
+		pa.field("file_hash", pa.string()),
+		pa.field("path", pa.string()),
+		pa.field("created_at", pa.string()),
+		])
+	return db.create_table(HASH_TABLE_NAME, schema=schema)		
+
+table=get_table()
+hash_table=get_hash_table()
+
+def is_file_processed(file_hash):
+	result=hash_table.search().where(f"file_hash='{file_hash}'").limit(1).to_list()
+	return len(result) > 0
+
+def save_file_hash(file_hash, path):
+	hash_table.add([
+		{
+			"file_hash":file_hash,
+			"path":path,
+			"created_at":str(datetime.now())
+		}	
+	])	
+	print(f"Saved hash: {file_hash}")
 
 #Store one chunk
 def store_chunk(chunk_id,path, file_type, text, embedding):
@@ -43,6 +74,7 @@ def store_chunk(chunk_id,path, file_type, text, embedding):
 			"file_type":file_type,
 			"text":text,
 			"embedding":embedding
+
 		}
 	])
 
@@ -52,11 +84,22 @@ def store_chunk(chunk_id,path, file_type, text, embedding):
 def show_all():
 	return table.to_pandas()
 
+def show_processed_files():
+	return hash_table.to_pandas()	
+
 #Total documents
 def total_chunks():
 	return table.count_rows()
 
+def total_files():
+	return hash_table.count_rows()
 
 if __name__=="__main__":
+	print("Document schema: ")
 	print(table.schema)
+
+	print("\nHash Table schema: ")
+	print(hash_table.schema)
+
 	print("Total chunks: ",total_chunks())
+	print("Total processed files: ", total_files())
