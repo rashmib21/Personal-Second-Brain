@@ -1,5 +1,6 @@
 from app.search.vector_search import search
 from app.llm.ollama_client import ask_llama
+import os
 
 def ask(question):
 	#Search similar chunks
@@ -20,14 +21,7 @@ def ask(question):
 	prompt=f"""
 		You are an AI assistant.
 
-		Use ONLY the information provided in the context below.
-
-		Rules:
-		1. Answer only from the provided context.
-		2. If the answer is not found in the context, reply:
-		   "I could not find that information in the indexed documents."
-		3. Do not make up information.
-		4. Mention the source file if possible.
+		Answer only using the context below.
 
 		Context: {context}
 
@@ -35,14 +29,27 @@ def ask(question):
 
 		Answer: """
 
-	return ask_llama(prompt)	
+	answer=ask_llama(prompt)
+
+	#collect unique source files
+	sources=[]
+	for doc in results:
+		filename=os.path.basename(doc['path'])
+		if filename not in sources:
+			sources.append(filename)
+
+	return answer,sources	
 
 if __name__=="__main__":
 	while True:
 		question=input("\n\n\nAsk: ")
 		if question.lower()=="exit":
 			break
-		answer=ask(question)
+		answer, sources=ask(question)
 		
 		print("\nAnswer:")
-		print(answer)		
+		print(answer)	
+
+		print("\nSource File:")
+		for source in sources:
+			print(f"-{source}")	
