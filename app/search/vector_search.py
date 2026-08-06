@@ -12,8 +12,12 @@ def search(question, how_many_results=5):
 	)
 
 	#Semantic Search
-	results=(table.search(question_vector).metric("cosine").limit(how_many_results).to_list())
-	
+	try:
+		results=(table.search(question_vector).metric("cosine").limit(how_many_results).to_list())
+	except Exception as e:
+		print(f"Search Error: {e}")
+		return "Search Failed.",[]
+		
 	if not results:
 		return []
 
