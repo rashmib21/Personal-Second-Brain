@@ -41,6 +41,22 @@ class SecondBrainHandler(FileSystemEventHandler):
 		if not event.is_directory:
 			print(f"Modified: {event.src_path}")
 
+	def on_deleted(self, event);
+		if not event.is_directory:
+			path=event.src_path
+			print(f"File deleted: {path}")
+
+			publish_file_event({
+				"path":path,
+				"event_type":"deleted"
+				})		
+			print("Delete event published to Kafka")
+
+	def on_moved(self, event):
+		if not event.is_directory:
+			print(f"File moved from {event.src_path} to {event.des_path}")		
+
+
 observer=Observer() #security guard, watching the folder
 
 handler=SecondBrainHandler() #handler reacting on that event
