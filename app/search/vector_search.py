@@ -2,7 +2,7 @@
 from app.storage.lancedb_store import table
 from app.embeddings.embedding_router import generate_embedding
 	
-
+similarity_threshold=0.5
 
 def search(question, how_many_results=5):
 	#convert user query into embeddings
@@ -17,9 +17,18 @@ def search(question, how_many_results=5):
 	if not results:
 		return []
 
+	filtered_results=[]
+	
+	for doc in results:
+		distance=doc["_distance"]
+		if distance<=similarity_threshold:
+			filtered_results.append(doc)
+
+	
+
 
 	#Return matching documents
-	return results
+	return filtered_results
 
 if __name__=="__main__":
 	
