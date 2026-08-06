@@ -29,6 +29,8 @@ def ask(question):
 			-Keep the answer concise and well structured.
 			-If the answer cannot be determined from the retrieved information, reply exactly:
 			"I could not find that information in the indexed documents."
+			-At the end of your answer, list ONLY the source file names that you actually used.
+
 
 		Retrieved Information:	
 
@@ -38,7 +40,10 @@ def ask(question):
 
 		Answer: """
 
-	answer=ask_gemini(prompt)
+	try:
+		answer=ask_gemini(prompt)
+	except Exception as e:
+		return f"LLM Error: {str(e)}",[]	
 
 	#collect unique source files
 	sources=[]
@@ -59,6 +64,6 @@ if __name__=="__main__":
 		print("\nAnswer:")
 		print(answer)	
 
-		print("\nSource File:")
-		for source in sources:
-			print(f"-{source}")	
+		# print("\nSource File:")
+		# for source in sources:
+		# 	print(f"-{source}")	
