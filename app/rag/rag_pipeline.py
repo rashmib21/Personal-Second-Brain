@@ -7,7 +7,7 @@ def ask(question):
 	results=search(question)
 
 	if not results:
-		return "I could not find any relevant information in the indexed documents"
+		return "I could not find any relevant information in the indexed documents",[]
 
 	#Combine all retrieved text
 	context=[]
