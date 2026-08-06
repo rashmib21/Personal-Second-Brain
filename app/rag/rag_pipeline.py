@@ -58,11 +58,23 @@ if __name__=="__main__":
 	while True:
 		question=input("\n\n\nAsk: ")
 		if question.lower()=="exit":
+			print("\nThank you for using Personal Second Brain!")
 			break
+
 		answer, sources=ask(question)
 		
+		print("\n"+"="*100)
+		print("🧠 Personal Second Brain")
+		print("="*100)
+
+		print("\nQuery: ")
+		print("-"*100)
+		print(question)
+
 		print("\nAnswer:")
+		print("-"*100)
 		print(answer)	
+		print("-"*100)
 
 		# print("\nSource File:")
 		# for source in sources:
