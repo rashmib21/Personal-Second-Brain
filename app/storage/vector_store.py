@@ -11,10 +11,9 @@ schema=pa.schema([
 	("embedding",pa.list_(pa.float32(),384))
 ])
 
-table=db.create_table(
-	"documents",
-	schema=schema,
-	mode="overwrite"
-)
+	table=db.create_table(
+		"documents",
+		schema=schema,
+	)
 
 print(table)
