@@ -1,5 +1,6 @@
 from app.search.vector_search import search
 from app.llm.ollama_client import ask_llama
+from app.llm.gemini_client import ask_gemini
 import os
 
 def ask(question):
@@ -7,21 +8,29 @@ def ask(question):
 	results=search(question)
 
 	if not results:
-		return "I could not find any relevant information in the indexed documents",[]
+		return "I could not find any relevant information in the indexed documents"
 
 	#Combine all retrieved text
 	context=[]
 
 	for doc in results:
 		context.append(
-			f"Source File: {doc['path']} {doc['text']}")
+			f"Source File: {os.path.basename(doc['path'])} {doc['text']}")
 	context="\n\n".join(context)
 	
 	#Make prompt
 	prompt=f"""
-		You are an AI assistant.
+		You are a Personal Second Brain Assistant.
 
-		Answer only using the context below.
+		Answer the user's question using only the retrieved information below.
+
+		Guidelines:
+			-Use the retrieved document content and the document name ("Source file") if it helps answer the question.
+			-Keep the answer concise and well structured.
+			-If the answer cannot be determined from the retrieved information, reply exactly:
+			"I could not find that information in the indexed documents."
+
+		Retrieved Information:	
 
 		Context: {context}
 
@@ -29,7 +38,7 @@ def ask(question):
 
 		Answer: """
 
-	answer=ask_llama(prompt)
+	answer=ask_gemini(prompt)
 
 	#collect unique source files
 	sources=[]
