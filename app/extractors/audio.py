@@ -12,7 +12,7 @@ def extract_audio(path):
 
     # Return transcript
     return {
-        "text": result["text"],
+        "transcript": result["text"],
         "language": result["language"],
         "words": result["words"]
     }
