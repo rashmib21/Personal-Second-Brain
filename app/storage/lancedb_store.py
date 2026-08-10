@@ -4,7 +4,8 @@ import pyarrow as pa
 from datetime import datetime
 
 
-DB_PATH='database'
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB_PATH = os.path.join(BASE_DIR, "database")
 
 TABLE_NAME="documents"
 HASH_TABLE_NAME="processed_files"
