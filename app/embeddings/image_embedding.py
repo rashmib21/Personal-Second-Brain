@@ -1,13 +1,19 @@
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 
-#Load clip model
-clip_model = SentenceTransformer("clip-ViT-B-32")
+_clip_model = None
+
+def get_clip_model():
+	global _clip_model
+	if _clip_model is None:
+		_clip_model = SentenceTransformer("clip-ViT-B-32")
+	return _clip_model
 
 def embed_image(image_path):
-	#Generate an ebmbedding for an image
+	#Generate an embedding for an image
+	model = get_clip_model()
 	image=Image.open(image_path).convert("RGB")
-	embedding=clip_model.encode(image)
+	embedding=model.encode(image)
 	return embedding.tolist()
 
 # #Testing
