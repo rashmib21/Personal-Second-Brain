@@ -1,5 +1,6 @@
 from app.celery_app.celery import app
 import logging
+import os
 
 # from app.extractors.pdf import extract_pdf
 # from app.extractors.document import extract_document
@@ -52,22 +53,41 @@ def route_file(self, event):
 
     # Video returns transcript + keyframes
     if isinstance(extracted_data, dict):
+        #Video
+        if "keyframes" in extracted_data:
+            transcript = extracted_data["transcript"]
+            keyframes = extracted_data["keyframes"]
+            chunks = chunk_text(transcript)
+            logger.info(f"Extracted {len(keyframes)} keyframes")
 
-        transcript = extracted_data["transcript"]
-        keyframes = extracted_data["keyframes"]
+        #Audio
+        elif "transcript" in extracted_data:
+            transcript = extracted_data['transcript']
+            chunks = chunk_text(transcript)
 
-        chunks = chunk_text(transcript)
-
-        logger.info(f"Extracted {len(keyframes)} keyframes")
+        else:
+            raise ValueError("Unknown extracted data format")        
 
     else:
 
         chunks = chunk_text(extracted_data)
 
+    filename = os.path.basename(path)
+
+    # If transcript/text is empty, still create at least one chunk with filename metadata
+    if not chunks:
+        chunks = [f"File: {filename}"]
+    else:
+        # Prepend filename context to every chunk so vector search matches file names and content
+        chunks = [f"File: {filename}\n{chunk}" for chunk in chunks]
+
     logger.info(f"Created {len(chunks)} chunks")
 
+    print(chunks)
+    print(len(chunks))
     #Generate embeddings and store in lancedb
     for chunk in chunks:
+        print("Chunk =>", chunk[:100])
 
         #Unique ID for every chunk
         chunk_id=str(uuid.uuid4())
@@ -83,6 +103,7 @@ def route_file(self, event):
             text=chunk,
             embedding=embedding
         )
+        print("Saved to LanceDB")
 
     # Mark file as processed
 
