@@ -15,8 +15,11 @@ def extract_keyframes(path, interval_sec=8):
     # Frames per second
     fps = video.get(cv2.CAP_PROP_FPS)
 
-    # Number of frames to skip
-    frame_gap = int(fps * interval_sec)
+    # Number of frames to skip (ensure frame_gap is at least 1 to prevent division by zero)
+    if fps <= 0:
+        fps = 1
+
+    frame_gap = max(1, int(fps * interval_sec))
 
     frame_number = 0
 
@@ -67,9 +70,11 @@ def extract_video(path):
         stderr=subprocess.DEVNULL,
         check=True,
     )
-
+    audio_result=extract_audio(audio_path)
     # Convert speech to text
-    transcript = extract_audio(audio_path)
+    transcript = audio_result['transcript']
+    print(transcript)
+    
 
     # Delete temporary audio
     if os.path.exists(audio_path):
