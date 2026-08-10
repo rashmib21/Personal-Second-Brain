@@ -8,6 +8,7 @@ import os
 # from app.celery_app.tasks.process_file import route_file
 from app.kafka_producer.producer import publish_file_event
 from app.utils.hash import calculate_file_hash
+
 # from app.storage.lancedb_store import is_duplicate
 
 # print("WATCHED_FOLDER =", WATCHED_FOLDER)
@@ -18,18 +19,41 @@ class SecondBrainHandler(FileSystemEventHandler):
 		if not event.is_directory: 
 			path=event.src_path
 
-			# print(repr(path))
-			# print(os.path.exists(path))
-			# print(os.path.getsize(path))
-			# print(calculate_file_hash(path))
+			#Wait until file copy finishes
+			last_size=-1
+			while True:
+				
+				if not os.path.exists(path):
+					print("File no longer exists.")
+					return
+				current_size=os.path.getsize(path)
+				if current_size==last_size:
+					break
+				last_size=current_size
+				time.sleep(1)
+
 			print(f"A new file is created: {path}")
+			print(f"Final Size: {os.path.getsize(path)} bytes")
+
+			# Skip zero-byte files (file was created but nothing was written)
+			if os.path.getsize(path) == 0:
+				print(f"Skipping zero-byte file: {path}")
+				return
+
 			file_hash = calculate_file_hash(path)
 			print(file_hash)
 			# Check duplicate
 			# if is_duplicate(file_hash):
 			# 	print("Duplicate file detected. Skipping...")
 			# 	return
-			file_type = os.path.splitext(path)[1].lower().lstrip(".")
+
+			extension = os.path.splitext(path)[1].lower()
+
+			file_type = FILE_TYPES.get(extension)
+			if file_type is None:
+				print(f"Unsupported file type: {extension}")
+				return
+
 			publish_file_event({
 				"path":path,
 				"file_type":file_type,
@@ -41,7 +65,7 @@ class SecondBrainHandler(FileSystemEventHandler):
 		if not event.is_directory:
 			print(f"Modified: {event.src_path}")
 
-	def on_deleted(self, event);
+	def on_deleted(self, event):
 		if not event.is_directory:
 			path=event.src_path
 			print(f"File deleted: {path}")
@@ -54,8 +78,7 @@ class SecondBrainHandler(FileSystemEventHandler):
 
 	def on_moved(self, event):
 		if not event.is_directory:
-			print(f"File moved from {event.src_path} to {event.des_path}")		
-
+			print(f"File moved from {event.src_path} to {event.dest_path}")
 
 observer=Observer() #security guard, watching the folder
 
