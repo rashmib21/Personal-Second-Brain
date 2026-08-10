@@ -1,29 +1,35 @@
-from faster_whisper import WhisperModel
+import torch
+from qwen_asr import Qwen3ASRModel
 
-model = WhisperModel(
-    "small",
-    device="cpu",
-    compute_type="int8"
+model_name="moorlee/qwen3-asr-0.6b-hinglish"
+
+print("Loading Srota ASR model...")
+
+model = Qwen3ASRModel.from_pretrained(
+    model_name,
+    dtype=torch.float16,
+    device_map="cuda:0"
 )
+print("Srota ASR model loaded.")
 
 
 def transcribe_audio(audio_path):
 
     try:
-        segments, info = model.transcribe(
-            audio_path,
-            beam_size=5,
-            vad_filter=True
-        )
+        result=model.transcribe(audio_path)
 
-        transcript = ""
+        if not result:
+            return {
+                "text":"",
+                "language":"",
+                "words":[]
+            }
 
-        for segment in segments:
-            transcript += segment.text + " "
+        transcription=result[0]
 
         return {
-            "text": transcript.strip(),
-            "language": info.language,
+            "text": transcription.text,
+            "language": transcription.language or "unknown",
             "words": []
         }
 
@@ -33,7 +39,26 @@ def transcribe_audio(audio_path):
 
 
 
+# Testing
+# if __name__ == "__main__":
 
+#     file_path = "/home/rashmi/Downloads/audio.mpeg"
+
+#     print("=" * 70)
+#     print("Testing Srota ASR")
+#     print("=" * 70)
+
+#     result = transcribe_audio(file_path)
+
+#     print("\nDetected Language:", result["language"])
+
+#     print("\nTranscript:")
+#     print(result["text"])
+
+#     print("\nWords:")
+#     print(result["words"])
+
+    print("=" * 70)
 
 
 
