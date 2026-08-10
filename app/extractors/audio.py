@@ -20,7 +20,7 @@ def extract_audio(path):
 		
 
 #Testing
-if __name__=='__main__':
-	file_path='watched_folder/song.mp3'
-	text=extract_audio(file_path)
-	print(text)		
+# if __name__=='__main__':
+# 	file_path='/home/rashmi/Downloads/audio.mpeg'
+# 	text=extract_audio(file_path)
+# 	print(text)		
