@@ -91,16 +91,16 @@ def extract_video(path):
 
 
 # # Testing
-# if __name__ == "__main__":
-#
-#     file_path = "watched_folder/sample.mp4"
-#
-#     result = extract_video(file_path)
-#
-#     print("\n----- Transcript -----\n")
-#     print(result["transcript"])
-#
-#     print("\n----- Keyframes -----\n")
-#
-#     for frame in result["keyframes"]:
-#         print(frame)
+if __name__ == "__main__":
+
+    file_path = "/home/rashmi/Downloads/momo.mp4"
+
+    result = extract_video(file_path)
+
+    print("\n----- Transcript -----\n")
+    print(result["transcript"])
+
+    print("\n----- Keyframes -----\n")
+
+    for frame in result["keyframes"]:
+        print(frame)
