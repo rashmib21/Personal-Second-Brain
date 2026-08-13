@@ -1,8 +1,12 @@
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="kafka")
+
 from kafka import KafkaProducer
 import json
 import time
 
 from config import KAFKA_BOOTSTRAP_SERVERS
+
 
 
 def value_serializer(v):
