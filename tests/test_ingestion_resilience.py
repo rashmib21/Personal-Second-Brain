@@ -1,6 +1,7 @@
 import os
 import shutil
 import sys
+import uuid
 import tempfile
 import zipfile
 import tarfile
@@ -162,14 +163,18 @@ def run_tests():
             assert dim == 384, f"Expected 384 dimensions, got {dim}"
 
         # 14. Task Execution & LanceDB Insertion
-        print("\n[TEST 14] End-to-End Celery Task Processing for Sample Document:")
+        sample_path = os.path.join(test_dir, f"sample_{uuid.uuid4().hex[:6]}.txt")
+        with open(sample_path, "w") as f:
+            f.write("Personal Second Brain ingestion test file content.")
+
         event = {
-            "path": txt_path,
+            "path": sample_path,
             "file_type": "text",
-            "file_hash": "test_hash_unique_12345"
+            "file_hash": f"test_hash_{uuid.uuid4().hex[:6]}"
         }
         res_task = route_file(event)
-        print("  Task Result:", res_task)
+        print("\n[TEST 14] End-to-End Celery Task Processing for Sample Document:")
+        print(f"  Task Result: {res_task}")
         assert res_task["status"] == "processed"
         assert res_task["total_chunks"] >= 1
 
