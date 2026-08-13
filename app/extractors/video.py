@@ -1,106 +1,128 @@
-# Responsible for extracting transcript and keyframes from video files
-
+import logging
 import os
 import subprocess
 import cv2
-
 from app.extractors.audio import extract_audio
 
+logger = logging.getLogger(__name__)
 
 def extract_keyframes(path, interval_sec=8):
-
-    # Open the video
     video = cv2.VideoCapture(path)
-
-    # Frames per second
     fps = video.get(cv2.CAP_PROP_FPS)
 
-    # Number of frames to skip (ensure frame_gap is at least 1 to prevent division by zero)
     if fps <= 0:
         fps = 1
 
     frame_gap = max(1, int(fps * interval_sec))
-
     frame_number = 0
-
-    # Store keyframe paths
     keyframes = []
 
     while video.isOpened():
-
         success, frame = video.read()
-
         if not success:
             break
 
-        # Save one frame every interval_sec
         if frame_number % frame_gap == 0:
-
             frame_name = (
                 os.path.splitext(path)[0]
                 + f"_frame_{frame_number}.jpg"
             )
-
             cv2.imwrite(frame_name, frame)
-
             keyframes.append(frame_name)
 
         frame_number += 1
 
     video.release()
-
     return keyframes
 
 
 def extract_video(path):
+    """
+    Extracts transcript from video files via FFmpeg and ASR.
+    Returns structured dict with status.
+    """
+    audio_path = os.path.splitext(path)[0] + "_temp_audio.wav"
+    transcript = ""
+    keyframes = []
 
-    # Temporary audio file
-    audio_path = os.path.splitext(path)[0] + ".wav"
+    try:
+        # Step 1: Extract audio using FFmpeg with try/finally cleanup
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-i",
+                    path,
+                    "-vn",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    "-y",
+                    audio_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
 
-    # Extract audio using FFmpeg
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-i",
-            path,
-            "-y",
-            audio_path,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
-    )
-    audio_result=extract_audio(audio_path)
-    # Convert speech to text
-    transcript = audio_result['transcript']
-    print(transcript)
-    
+            if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+                audio_result = extract_audio(audio_path)
+                transcript = audio_result.get("transcript") or audio_result.get("text", "")
+            else:
+                logger.info(f"No audio stream found in video: {path}")
 
-    # Delete temporary audio
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
+        except FileNotFoundError:
+            logger.error("FFmpeg executable not found on system path.")
+            return {
+                "status": "MISSING_DEPENDENCY",
+                "transcript": "",
+                "text": "",
+                "keyframes": [],
+                "error": "FFmpeg not installed"
+            }
+        except subprocess.CalledProcessError:
+            logger.info(f"FFmpeg failed to extract audio from video (likely silent video): {path}")
 
-    # Extract keyframes
-    keyframes = extract_keyframes(path)
+        finally:
+            if os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp audio file {audio_path}: {e}")
 
-    # Return extracted data
-    return {
-        "transcript": transcript,
-        "keyframes": keyframes,
-    }
+        # Step 2: Extract keyframes safely
+        try:
+            keyframes = extract_keyframes(path)
+        except Exception as e:
+            logger.warning(f"Keyframe extraction error for {path}: {e}")
 
+        transcript = transcript.strip()
+        if not transcript:
+            return {
+                "status": "NO_TEXT_EXTRACTED",
+                "transcript": "",
+                "text": "",
+                "keyframes": keyframes,
+                "error": "No speech transcript found in video"
+            }
 
-# # Testing
-if __name__ == "__main__":
+        return {
+            "status": "SUCCESS",
+            "transcript": transcript,
+            "text": transcript,
+            "keyframes": keyframes,
+            "error": None
+        }
 
-    file_path = "/home/rashmi/Downloads/momo.mp4"
-
-    result = extract_video(file_path)
-
-    print("\n----- Transcript -----\n")
-    print(result["transcript"])
-
-    print("\n----- Keyframes -----\n")
-
-    for frame in result["keyframes"]:
-        print(frame)
+    except Exception as e:
+        logger.error(f"Failed to process video {path}: {e}")
+        return {
+            "status": "CORRUPT_FILE",
+            "transcript": "",
+            "text": "",
+            "keyframes": [],
+            "error": str(e)
+        }
