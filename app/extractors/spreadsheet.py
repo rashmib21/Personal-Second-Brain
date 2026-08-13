@@ -1,43 +1,51 @@
-# Responsible for extracting text from Excel (.xlsx) files
-
+import csv
+import logging
+import os
 from openpyxl import load_workbook
 
+logger = logging.getLogger(__name__)
 
 def extract_spreadsheet(path):
+    ext = os.path.splitext(path)[1].lower()
 
-    # Open the workbook
-    workbook = load_workbook(path)
+    # CSV file handling
+    if ext == ".csv":
+        try:
+            rows = []
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    line = " ".join(val.strip() for val in row if val.strip())
+                    if line:
+                        rows.append(line)
+            full_text = "\n".join(rows)
+            if not full_text.strip():
+                return {"text": "", "status": "NO_TEXT_EXTRACTED", "error": None}
+            return {"text": full_text, "status": "SUCCESS", "error": None}
+        except Exception as e:
+            logger.error(f"Error reading CSV {path}: {e}")
+            return {"text": "", "status": "CORRUPT_FILE", "error": str(e)}
 
-    # Store extracted text
-    text = ""
+    # Excel / Spreadsheet handling
+    if ext in [".xls", ".ods"]:
+        logger.warning(f"Legacy/OpenDocument spreadsheet format ({ext}) parsing attempted: {path}")
 
-    # Visit every sheet
-    for sheet in workbook.worksheets:
+    try:
+        workbook = load_workbook(path, data_only=True)
+        text_lines = []
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                row_vals = [str(cell).strip() for cell in row if cell is not None and str(cell).strip() != ""]
+                if row_vals:
+                    text_lines.append(" ".join(row_vals))
 
-        # Visit every row
-        for row in sheet.iter_rows(values_only=True):
+        full_text = "\n".join(text_lines)
+        if not full_text.strip():
+            return {"text": "", "status": "NO_TEXT_EXTRACTED", "error": None}
 
-            # Visit every cell
-            for cell in row:
+        return {"text": full_text, "status": "SUCCESS", "error": None}
 
-                # Ignore empty cells
-                if cell is not None:
-
-                    # Add cell value
-                    text = text + str(cell) + " "
-
-            # Move to next line
-            text = text + "\n"
-
-    # Return extracted text
-    return text
-
-
-# # Testing
-# if __name__ == "__main__":
-#
-#     file_path = "watched_folder/sample.xlsx"
-#
-#     text = extract_spreadsheet(file_path)
-#
-#     print(text)
+    except Exception as e:
+        logger.error(f"Failed to extract spreadsheet {path}: {e}")
+        status = "UNSUPPORTED_FORMAT" if ext in [".xls", ".ods"] else "CORRUPT_FILE"
+        return {"text": "", "status": status, "error": str(e)}
