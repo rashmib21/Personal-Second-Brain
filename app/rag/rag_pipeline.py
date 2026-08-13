@@ -1,126 +1,114 @@
+import os
 from app.search.vector_search import search
 from app.llm.ollama_client import ask_llama
 from app.llm.gemini_client import ask_gemini
-import os
+from app.storage.lancedb_store import get_hash_table
 
-from app.storage.lancedb_store import get_hash_table, get_table
 
 def ask(question):
-	# 1. Check for metadata / file existence / file list questions
+	"""
+	Main RAG function: searches vector database and generates an answer using Ollama.
+	Returns: (answer_string, list_of_sources, num_relevant_chunks)
+	"""
 	question_lower = question.lower()
-	is_existence_query = any(pattern in question_lower for pattern in [
-		"do you have", "do i have", "which video", "which file", "which document",
-		"what files", "list files", "available video", "available file", "show me files"
+
+	# Step 1: Check for file list / file existence questions
+	is_file_list_query = any(phrase in question_lower for phrase in [
+		"do you have", "do i have", "which file", "which document",
+		"what files", "list files", "show me files"
 	])
 
-	if is_existence_query:
+	if is_file_list_query:
 		hash_table = get_hash_table()
-		table = get_table()
-
-		all_paths = set()
+		all_paths = []
 		if hash_table is not None:
 			hdf = hash_table.to_pandas()
 			if not hdf.empty:
-				all_paths.update(hdf["path"].tolist())
-		if table is not None:
-			df = table.to_pandas()
-			if not df.empty:
-				all_paths.update(df["path"].tolist())
+				all_paths = hdf["path"].tolist()
 
 		file_names = sorted(list(set(os.path.basename(p) for p in all_paths)))
 
-		# Check if asking about specific file existence (e.g. "momo")
 		for fn in file_names:
-			base_fn = os.path.splitext(fn)[0].lower()
-			if base_fn in question_lower or fn.lower() in question_lower:
-				return f"Yes, '{fn}' is indexed in your Personal Second Brain.", [fn]
+			if fn.lower() in question_lower:
+				return f"Yes, '{fn}' is indexed in your Personal Second Brain.", [fn], 1
 
-		if "video" in question_lower:
-			videos = [fn for fn in file_names if fn.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm'))]
-			if videos:
-				return f"Yes, the following video(s) are available: {', '.join(videos)}", videos
-			else:
-				return "No video files are currently indexed.", []
+		if file_names:
+			return f"The following files are indexed in your Personal Second Brain: {', '.join(file_names)}", file_names, len(file_names)
 
-		if "file" in question_lower or "list" in question_lower:
-			if file_names:
-				return f"The following files are indexed in your Personal Second Brain: {', '.join(file_names)}", file_names
-
-	# 2. Search similar chunks
+	# Step 2: Perform vector search
 	results = search(question)
+	num_chunks = len(results)
 
-	if not results:
-		return "I could not find any relevant information in the indexed documents.", []
+	# Retrieval decision determined by Python BEFORE calling Ollama
+	if not results or num_chunks == 0:
+		return "Not found in the retrieved source.", [], 0
 
-	# Combine all retrieved text
-	context = []
+	# Step 3: Build context string and collect source filenames from python results
+	context_list = []
 	retrieved_sources = set()
 
 	for doc in results:
-		fname = os.path.basename(doc['path'])
-		retrieved_sources.add(fname)
-		context.append(f"Source File: {fname}\n{doc['text']}")
+		filename = os.path.basename(doc["path"])
+		retrieved_sources.add(filename)
+		context_list.append(doc["text"])
 
-	context_str = "\n\n".join(context)
+	sources = sorted(list(retrieved_sources))
+	context_str = "\n\n".join(context_list)
 
-	# Make prompt
-	prompt = f"""
-		You are a Personal Second Brain Assistant.
+	# Step 4: Build prompt for LLM
+	prompt = f"""You are a Personal Second Brain Assistant.
 
-		Answer the user's question using the retrieved information below.
+Answer the user's question using ONLY the retrieved context below.
 
-		Guidelines:
-			- Use the retrieved document content and the document name ("Source File") to answer the question.
-			- If the user asks about the content or summary of a file, describe or summarize whatever text/transcript is provided in the Context (including transcribed audio/speech).
-			- If the context contains no relevant information at all to answer the question, reply:
-			"I could not find that information in the indexed documents."
+Guidelines:
+- Rely strictly on the retrieved document content in the Context.
+- You may synthesize an answer across multiple retrieved chunks.
+- Do not use general outside knowledge or make up information.
+- If the retrieved context genuinely does not contain enough information to answer the question, reply exactly:
+  "Not found in the retrieved source."
 
-		Retrieved Information:	
+Retrieved Context:
+{context_str}
 
-		Context: {context_str}
+Question: {question}
 
-		Question: {question}
+Answer:"""
 
-		Answer: """
-
+	# Step 5: Ask LLM (Ollama first, Gemini fallback)
 	try:
 		answer = ask_llama(prompt)
-	except Exception as e:
+	except Exception:
 		try:
 			answer = ask_gemini(prompt)
-		except Exception as e2:
-			return f"LLM Error: {str(e2)}", []
+		except Exception as e:
+			answer = f"LLM Error: {str(e)}"
 
-	# Only report sources if answer is not a failure response
-	if "I could not find" in answer:
-		sources = []
+	return answer, sources, num_chunks
+
+
+def format_response(answer, sources, num_chunks=0):
+	"""
+	Formats the final answer, source attribution, and relevant chunk count.
+	"""
+	output = f"Answer:\n{answer}\n\n"
+
+	if not sources or num_chunks == 0:
+		output += "Source:\nNo relevant source found.\n\n"
+	elif len(sources) == 1:
+		output += f"Source:\n{sources[0]}\n\n"
 	else:
-		sources = sorted(list(retrieved_sources))
+		output += "Sources:\n" + "\n".join(f"- {s}" for s in sources) + "\n\n"
 
-	return answer, sources	
+	output += f"Relevant chunks:\n{num_chunks}"
 
-if __name__=="__main__":
+	return output
+
+
+if __name__ == "__main__":
 	while True:
-		question=input("\n\n\nAsk: ")
-		if question.lower()=="exit":
-			print("\nThank you for using Personal Second Brain!")
+		question = input("\nAsk: ")
+		if question.lower() == "exit":
 			break
 
-		answer, sources=ask(question)
-		
-		print("\n"+"="*100)
-		print("🧠 Personal Second Brain")
-		print("="*100)
-
-		print("\nQuery: ")
-		print("-"*100)
-		print(question)
-
-		print("\nAnswer:")
-		print("-"*100)
-		print(answer)	
-		print("-"*100)
-
-		# print("\nSource File:")
-		# for source in sources:
-		# 	print(f"-{source}")	
+		answer, sources, num_chunks = ask(question)
+		print("\n" + format_response(answer, sources, num_chunks))
