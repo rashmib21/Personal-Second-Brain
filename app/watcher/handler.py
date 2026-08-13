@@ -4,6 +4,7 @@ from watchdog.events import FileSystemEventHandler #react for file modify, creat
 from watchdog.observers import Observer #watch a folder continously
 import time
 from config import *
+from app.utils.file_types import FILE_TYPES
 import os
 # from app.celery_app.tasks.process_file import route_file
 from app.kafka_producer.producer import publish_file_event
