@@ -32,35 +32,51 @@ def route_file(self, event):
     filename = os.path.basename(path)
     extracted_data = extract_file(path)
 
+    # Check status for structured extraction returns
+    if isinstance(extracted_data, dict):
+        status = extracted_data.get("status", "SUCCESS")
+        if status != "SUCCESS":
+            logger.warning(f"File processing skipped for {path}: status={status}, error={extracted_data.get('error')}")
+            save_file_hash(file_hash=file_hash, path=path)
+            return {"status": status, "path": path, "total_chunks": 0}
+
     chunks = []
 
-    # Case 1: PDF extraction returned a list of page dictionaries
-    if isinstance(extracted_data, list):
-        for page_info in extracted_data:
-            page_num = page_info.get("page", 1)
-            page_text = page_info.get("text", "")
+    # Case 1: PDF extraction returned structured dict with page dictionaries or raw page list
+    pages = []
+    if isinstance(extracted_data, dict) and extracted_data.get("pages"):
+        pages = extracted_data["pages"]
+    elif isinstance(extracted_data, list):
+        pages = extracted_data
 
-            page_chunks = chunk_text(page_text)
-            for c in page_chunks:
-                header = f"File: {filename} | Page: {page_num}"
-                chunks.append(f"{header}\n{c}")
+    if pages:
+        for page_info in pages:
+            if isinstance(page_info, dict):
+                page_num = page_info.get("page", 1)
+                page_text = page_info.get("text", "")
 
-    # Case 2: Audio/Video extraction returned a dictionary with transcript
-    elif isinstance(extracted_data, dict):
-        transcript = extracted_data.get("transcript", "")
-        text_chunks = chunk_text(transcript)
-        for c in text_chunks:
-            chunks.append(f"File: {filename}\n{c}")
+                page_chunks = chunk_text(page_text)
+                for c in page_chunks:
+                    header = f"File: {filename} | Page: {page_num}"
+                    chunks.append(f"{header}\n{c}")
 
-    # Case 3: Plain text / Word / Spreadsheet / standard string output
+    # Case 2: Standard structured dict or string return
     else:
-        text_chunks = chunk_text(str(extracted_data))
+        text_content = ""
+        if isinstance(extracted_data, dict):
+            text_content = extracted_data.get("transcript") or extracted_data.get("text", "")
+        else:
+            text_content = str(extracted_data)
+
+        text_chunks = chunk_text(text_content)
         for c in text_chunks:
             chunks.append(f"File: {filename}\n{c}")
 
-    # Ensure at least one chunk exists if extraction returned empty text
+    # If extraction yielded no text chunks, do NOT create dummy chunks or LanceDB records
     if not chunks:
-        chunks = [f"File: {filename}"]
+        logger.info(f"No text chunks created for {filename}")
+        save_file_hash(file_hash=file_hash, path=path)
+        return {"status": "NO_TEXT_EXTRACTED", "path": path, "total_chunks": 0}
 
     logger.info(f"Created {len(chunks)} chunks for {filename}")
 
