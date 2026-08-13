@@ -1,31 +1,40 @@
-# Responsible for extracting text from Microsoft Word (.docx) files
-
+import logging
+import os
 from docx import Document
 
+logger = logging.getLogger(__name__)
 
 def extract_docx(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".doc":
+        logger.warning(f"Legacy binary Word format (.doc) parsing attempted: {path}")
 
-    # Open the Word document
-    document = Document(path)
+    try:
+        document = Document(path)
+        paragraphs = []
+        for paragraph in document.paragraphs:
+            p_text = paragraph.text.strip()
+            if p_text:
+                paragraphs.append(p_text)
 
-    # Store extracted text
-    text = ""
+        text = "\n".join(paragraphs)
+        if not text:
+            return {
+                "text": "",
+                "status": "NO_TEXT_EXTRACTED",
+                "error": None
+            }
 
-    # Visit every paragraph
-    for paragraph in document.paragraphs:
-
-        # Add paragraph text
-        text = text + paragraph.text + "\n"
-
-    # Return extracted text
-    return text
-
-
-# # Testing
-# if __name__ == "__main__":
-#
-#     file_path = "watched_folder/sample.docx"
-#
-#     text = extract_docx(file_path)
-#
-#     print(text)
+        return {
+            "text": text,
+            "status": "SUCCESS",
+            "error": None
+        }
+    except Exception as e:
+        logger.error(f"Failed to extract document {path}: {e}")
+        status = "UNSUPPORTED_FORMAT" if ext == ".doc" else "CORRUPT_FILE"
+        return {
+            "text": "",
+            "status": status,
+            "error": str(e)
+        }
