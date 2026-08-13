@@ -48,10 +48,13 @@ class SecondBrainHandler(FileSystemEventHandler):
 			# 	print("Duplicate file detected. Skipping...")
 			# 	return
 
+			extension = os.path.splitext(path)[1].lower()
+
 			file_type = FILE_TYPES.get(extension)
 			if file_type is None:
 				print(f"Unsupported file type: {extension} — skipping file: {path}")
 				return
+
 
 
 			publish_file_event({
