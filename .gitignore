@@ -20,3 +20,6 @@ watched_folder/
 
 # OS
 .DS_Store
+
+*.lance/
+dump.rdb
