@@ -21,6 +21,7 @@ FILE_TYPES = {
     # Audio
     ".mp3": "audio",
     ".wav": "audio",
+    ".mpeg":"audio",
     ".m4a": "audio",
     ".aac": "audio",
     ".flac": "audio",
