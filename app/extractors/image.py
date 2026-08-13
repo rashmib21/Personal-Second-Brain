@@ -1,23 +1,43 @@
-#Responsible for extracting text from images
+import logging
+from PIL import Image
+import pytesseract
 
-from PIL import Image #Open image files
-import pytesseract #OCR Engine
-
+logger = logging.getLogger(__name__)
 
 def extract_image(path):
-	
-	#open the image
-	image=Image.open(path)
+    """
+    Extracts text from image files using Tesseract OCR.
+    Returns structured dict with status.
+    """
+    try:
+        image = Image.open(path)
+        text = pytesseract.image_to_string(image) or ""
+        text = text.strip()
 
-	#OCR
-	text=pytesseract.image_to_string(image)
+        if not text:
+            return {
+                "text": "",
+                "status": "NO_TEXT_EXTRACTED",
+                "error": None
+            }
 
-	#return the text
-	return text	
+        return {
+            "text": text,
+            "status": "SUCCESS",
+            "error": None
+        }
 
-# #Testing 
-
-# if __name__=="__main__":
-# 	file_path="watched_folder/vingsfire.png"
-# 	text=extract_image(file_path)
-# 	print(text)	
+    except pytesseract.TesseractNotFoundError as e:
+        logger.error(f"Tesseract OCR executable not found: {e}")
+        return {
+            "text": "",
+            "status": "MISSING_DEPENDENCY",
+            "error": "Tesseract OCR binary not installed"
+        }
+    except Exception as e:
+        logger.error(f"Failed to process image {path}: {e}")
+        return {
+            "text": "",
+            "status": "CORRUPT_FILE",
+            "error": str(e)
+        }
