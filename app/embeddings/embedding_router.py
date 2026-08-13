@@ -2,7 +2,8 @@ from app.embeddings.text_embedding import embed_text
 from app.embeddings.image_embedding import embed_image
 
 def generate_embedding(file_type, content):
-	#Generate embedding based on file_type
+	# Strip leading dot if present (e.g. '.txt' -> 'txt')
+	file_type = str(file_type).lstrip(".").lower()
 
 	#Text based
 	if file_type in (
