@@ -175,23 +175,64 @@ def search(question, max_results=10):
 		rrf_candidates.append(doc)
 
 	reranked=rerank(question, rrf_candidates)
-
+	# print("\n===== RERANKED RESULTS =====")
+	
+	# for i, (doc, score) in enumerate(reranked, 1):
+	# 	print(f"\n#{i}")
+	# 	print("Score:", score)
+	# 	print("Source:", os.path.basename(doc["path"]))
+	# 	print("Text:", doc["text"][:500])
 		
 
 	#step 7: build the final list, max 3 chunks per source file
 	final_chunks=[]
 	chunks_per_source={}
+	seen_texts=set()
 
-	for doc, score in reranked:
-		source_name=os.path.basename(doc['path'])
+	if reranked:
+		#Cross encoder: higher score=morerelevant
+		top_score=reranked[0][1]
 
-		count_so_far=chunks_per_source.get(source_name, 0)
-		if count_so_far<3:
+		# #If even the best result is very poor, return no results
+		if top_score<-1.5:
+			reranked=[]
+	if reranked:
+		#Not a fixed global threshold
+		cutoff_score=max(-2.0,top_score-4.5)
+		previous_score=None		
+
+		for doc, score in reranked:
+
+			#stop if the candidate is too far below the best result
+			if score< cutoff_score:
+				break
+
+			#stop when there is a large relevance drop
+			if(previous_score is not None and previous_score-score>3.5 and score<0.0):
+				break
+			#Normalize text for duplicate detection
+			normalized_text=re.sub(r'\s+', ' ', doc['text'].strip().lower())
+
+			if normalized_text in seen_texts:
+				continue
+			
+			source_name=os.path.basename(doc['path'])
+
+			#Maximum 3 chunks from one source 	
+			count_so_far=chunks_per_source.get(source_name, 0)
+			if count_so_far>=3:
+				continue
+
+			# Accept this chunk
+			seen_texts.add(normalized_text)
 			chunks_per_source[source_name]=count_so_far+1
 			final_chunks.append(doc)
 
-		if len(final_chunks)==max_results:
-			break
+			previous_score=score
+
+			#max result is now a CAP, not a target	
+			if len(final_chunks)>=max_results:
+				break
 
 
 	#step 8: print what happened, useful for debugging
