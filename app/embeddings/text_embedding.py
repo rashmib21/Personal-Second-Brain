@@ -2,7 +2,7 @@
 from sentence_transformers import SentenceTransformer
 
 #Load the model only once
-model=SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+model=SentenceTransformer("BAAI/bge-small-en-v1.5", device="cpu")
 
 def embed_text(text):
 	#Convert text into a vector embeddings

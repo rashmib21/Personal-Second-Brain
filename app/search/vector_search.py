@@ -1,169 +1,212 @@
 import os
 import re
+from rank_bm25 import BM25Okapi
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from app.storage.lancedb_store import get_table
 from app.embeddings.embedding_router import generate_embedding
 
 
-def is_table_of_contents_or_noise(text):
-	"""
-	Checks if a chunk contains Table of Contents dotted lines (. . . 419)
-	or publisher blurb reviews that crowd out actual body text.
-	"""
-	text_lower = text.lower()
+#takes a question and one chunk of text together as a pair, and directly outputs how relevant that chunk actually is to the question — instead of comparing separate embeddings or matching separate words, it reads both at once and judges the match itself.
+from sentence_transformers import CrossEncoder 
+from nltk.stem import PorterStemmer
 
-	# Chunks with 15 or more periods are usually Table of Contents or Index page numbers
-	if text.count(".") >= 15:
+reranker=CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+stemmer = PorterStemmer()
+
+
+def simple_stem(word):
+	return stemmer.stem(word)
+
+
+def is_noise_chunk(text):
+	#Skip table of contents/index pages that just clutter results
+	text_lower=text.lower()
+
+	#Dotted line like chpater 3.......42(table of content)
+	if text.count(".")>=15:
 		return True
 
-	# Publisher review headers or Table of Contents section headings
-	if "contents in detail" in text_lower or "reviews for how linux works" in text_lower or "420 bibliography" in text_lower:
+	#lots of short lines ending in numbers like p no. which is typical of a table of contents or an index page
+	lines=text.split("\n")
+	lines_ending_in_number=0
+	for line in lines:
+		line=line.strip()
+		if line and line[-1].isdigit():
+			lines_ending_in_number+=1
+
+	if len(lines)>5 and lines_ending_in_number/len(lines)>=0.5:
 		return True
 
-	return False
+	#generic heading words that indicate a TOC/index section, not tied to any specific book's title or wording 
+	generic_noise_headings=["table of contents","bibliography", "index of terms"]
+	for heading in generic_noise_headings:
+		if heading in text_lower:
+			return True
+	return False					
 
 
-def extract_query_keywords(query):
-	"""
-	Extracts significant search keywords from query, filtering out common stop words.
-	"""
-	stop_words = {
-		"what", "which", "where", "who", "how", "when", "why", "did", "does", "is", "are", "was",
-		"were", "the", "a", "an", "in", "on", "at", "for", "to", "of", "her", "his", "their",
-		"mentioned", "listed", "complete", "used", "only", "using", "experience", "current",
-		"resume", "document", "file"
-	}
-	words = re.findall(r'\b[a-zA-Z0-9_\-\.]+\b', query.lower())
-	return [w for w in words if w not in stop_words and len(w) > 2]
+def get_words(text):
+	#break text into simple lowercase words. 
+	words=re.findall(r'\b[a-zA-Z0-9_\-\.]+\b',text.lower())
+	words=[w for w in words if w not in ENGLISH_STOP_WORDS]
+	words=[simple_stem(w) for w in words]
+	return words
 
+def rerank(question, candidate_chunks):
+	#candidate_chunks=list of chunks dicts that receive after RRf
+	pairs=[]
+	for chunk in candidate_chunks:
+		pair=(question, chunk['text'])
+		pairs.append(pair)
 
-def search(question, max_results=10, score_threshold=0.55):
-	"""
-	Performs Hybrid Search (Vector + Keyword Reranking) with Document Diversity Capping.
-	Admits genuine natural language and keyword matches while strictly filtering out unrelated queries.
-	"""
+	#ask the cross encoder model to score every pair
+	#higher score=more relevant to the question
+	scores=reranker.predict(pairs)
 
-	table = get_table()
+	#attach each score to its matching chunk
+	scored_chunks=[]
+	for i in range(len(candidate_chunks)):
+		chunk=candidate_chunks[i]
+		score=scores[i]
+		scored_chunks.append((chunk,score))
+
+	#sort manually so the highest score comes first
+	def get_score(pair):
+		#pair looks like (chunks, score), we want to sort by score, which is pair[1]
+		return pair[1]
+	scored_chunks.sort(key=get_score, reverse=True)
+	
+	return scored_chunks		
+
+def search(question, max_results=10):
+	table=get_table()
 	if table is None:
-		print("LanceDB table is not available.")
+		print("LanceDB table is not available")
 		return []
 
-	question_vector = generate_embedding("text", question)
-	question_lower = question.lower()
-	keywords = extract_query_keywords(question)
+	#step 1: turn the question into a vector for dense search
+	question_vector=generate_embedding("text",question)
 
-	df = table.to_pandas()
-	target_path = None
-
-	if not df.empty:
-		for path_str in df['path'].unique():
-			filename = os.path.basename(str(path_str)).lower()
-			if filename in question_lower:
-				target_path = path_str
-				break
-
-	try:
-		# Step 1: Raw vector search candidates (limit 100)
-		if target_path:
-			escaped_path = str(target_path).replace("'", "''")
-			raw_chunks = table.search(question_vector).where(f"path = '{escaped_path}'").metric("cosine").limit(100).to_list()
-		else:
-			raw_chunks = table.search(question_vector).metric("cosine").limit(100).to_list()
-
-		# Step 2: Multi-keyword candidate search in DB to boost exact entity/keyword matches
-		kw_candidates = {}
-		if keywords and not df.empty:
-			for idx, row in df.iterrows():
-				text_lower = str(row['text']).lower()
-				matches = [kw for kw in keywords if kw in text_lower]
-				if len(matches) >= 2 or (len(keywords) == 1 and len(matches) >= 1):
-					kw_candidates[row['chunk_id']] = {
-						"chunk_id": row['chunk_id'],
-						"path": row['path'],
-						"file_type": row['file_type'],
-						"text": row['text'],
-						"_distance": 0.70
-					}
-
-		# Combine vector and keyword candidates
-		combined = {}
-		for doc in raw_chunks:
-			combined[doc['chunk_id']] = doc
-		for cid, doc in kw_candidates.items():
-			if cid not in combined:
-				combined[cid] = doc
-
-		is_asking_for_toc = "table of contents" in question_lower or "contents" in question_lower or "bibliography" in question_lower
-
-		# Step 3: Hybrid Scoring & Keyword Reranking
-		scored = []
-		for doc in combined.values():
-			text = doc.get("text", "")
-			text_lower = text.lower()
-			raw_dist = doc.get("_distance", 1.0)
-			src = os.path.basename(doc.get("path", ""))
-
-			if is_table_of_contents_or_noise(text) and not is_asking_for_toc:
-				continue
-
-			matched_kws = [kw for kw in keywords if kw in text_lower]
-			kw_match_count = len(matched_kws)
-
-			bonus = 0.0
-			if kw_match_count > 0:
-				ratio = kw_match_count / max(len(keywords), 1)
-				bonus += ratio * 0.25
-				if kw_match_count >= 2:
-					bonus += 0.10
-
-			if "rashmi" in question_lower and "rashmi" in text_lower:
-				bonus += 0.10
-
-			rerank_score = raw_dist - bonus
-
-			# Quality Threshold: Must pass score threshold or have strong multi-keyword match
-			if raw_dist <= score_threshold or (kw_match_count >= 2 and rerank_score <= 0.60):
-				scored.append({
-					"doc": doc,
-					"src": src,
-					"raw_dist": raw_dist,
-					"rerank_score": rerank_score,
-					"kw_count": kw_match_count
-				})
-
-		scored.sort(key=lambda x: x["rerank_score"])
-
-		# Step 4: Document Diversity Cap (max 3 chunks per source file)
-		# Prevents any single 2,500-page book or 69-row spreadsheet from monopolizing top-k slots
-		relevant_chunks = []
-		source_counts = {}
-
-		for item in scored:
-			src = item["src"]
-			cnt = source_counts.get(src, 0)
-
-			if target_path or cnt < 3:
-				source_counts[src] = cnt + 1
-				relevant_chunks.append(item["doc"])
-				if len(relevant_chunks) == max_results:
-					break
-
-		# Step 5: Diagnostic logging
-		sources = sorted(list(set(os.path.basename(c["path"]) for c in relevant_chunks)))
-		print(f"\nQuery: {question}")
-		print(f"Raw chunks: {len(raw_chunks)}")
-		print(f"Relevant chunks: {len(relevant_chunks)}")
-		print(f"Sources: {', '.join(sources) if sources else 'None'}")
-
-		return relevant_chunks
-
-	except Exception as e:
-		print(f"Search Error: {e}")
+	#step 2: get all chunks as a normal table, remove noise chunks
+	all_chunks=table.to_pandas()
+	if all_chunks.empty:
 		return []
 
+	clean_rows=[]
+	for i in range(len(all_chunks)):
+		row=all_chunks.iloc[i]
+		if not is_noise_chunk(row["text"]):
+			clean_rows.append(row)
+	if len(clean_rows)==0:
+		return []
+
+	#step 3: dense (vector) search gives us a ranking based on meaning
+	dense_results=table.search(question_vector).metric("cosine").limit(100).to_list()
+
+	dense_rank={} #chunk_id: rank number 1=best
+	rank_number=1
+	for doc in dense_results:
+		dense_rank[doc["chunk_id"]]=rank_number
+		rank_number+=1
+
+	#step 4: lexical (BM25) search gives us a ranking based on matching words
+	all_words_list=[]
+	for row in clean_rows:
+		all_words_list.append(get_words(row['text']))
+
+	bm25=BM25Okapi(all_words_list)
+	question_words=get_words(question)
+	bm25_scores=bm25.get_scores(question_words)
+
+	#pair each chunk with its bm25 score, then sort high to low
+	bm25_pairs=[]
+	for i in range(len(clean_rows)):
+		chunk_id=clean_rows[i]['chunk_id']
+		score=bm25_scores[i]
+		bm25_pairs.append((chunk_id, score))
+	def get_second_item(pair):
+		#pair looks like (chunk_id, score), we want to sort by score, which is pair[1]
+		return pair[1]			 	
+	bm25_pairs.sort(key=get_second_item, reverse=True)	
+
+	lexical_rank={} #chunk_id: rank number 1=best
+	rank_number=1
+	for chunk_id, score in bm25_pairs[:100]:
+		lexical_rank[chunk_id]=rank_number
+		rank_number+=1
+
+	#Step 5: keep a lookup of full chunk data by chunk_id , so we can build final results later
+	chunk_data_by_id={}
+	for doc in dense_results:
+		chunk_data_by_id[doc['chunk_id']]=doc
+
+	for row in clean_rows:
+		if row['chunk_id'] not in chunk_data_by_id:
+			chunk_data_by_id[row['chunk_id']]={
+				"chunk_id":row["chunk_id"],
+				'path':row['path'],
+				'file_type':row['file_type'],
+				'text':row['text'],
+			}
+
+	#step 6: combine both rankings using RRF (Reciprocal Rank Fusion)
+	#a chunk that ranks well in either search gets a good combined score
+	k=60 #standard RRf constant
+
+	all_chunks_ids=set(list(dense_rank.keys())+list(lexical_rank.keys()))
+
+	combined_score=[]
+	for chunk_id in all_chunks_ids:
+		score=0.0
+
+		if chunk_id in dense_rank:
+			score+=1/(k+dense_rank[chunk_id])
+
+		if chunk_id in lexical_rank:
+			score+=1/(k+lexical_rank[chunk_id])
+		combined_score.append((chunk_id, score))
+	
+	#sort so the best combined score comes first
+	combined_score.sort(key=get_second_item, reverse=True)
+	top_n_for_reranking=40
+	rrf_candidates=[]
+	for chunk_id, score in combined_score[:top_n_for_reranking]:
+		doc=chunk_data_by_id[chunk_id]
+		rrf_candidates.append(doc)
+
+	reranked=rerank(question, rrf_candidates)
+
+		
+
+	#step 7: build the final list, max 3 chunks per source file
+	final_chunks=[]
+	chunks_per_source={}
+
+	for doc, score in reranked:
+		source_name=os.path.basename(doc['path'])
+
+		count_so_far=chunks_per_source.get(source_name, 0)
+		if count_so_far<3:
+			chunks_per_source[source_name]=count_so_far+1
+			final_chunks.append(doc)
+
+		if len(final_chunks)==max_results:
+			break
 
 
-if __name__ == "__main__":
-	while True:
-		question = input("Ask: ")
-		results = search(question)
-		print(f"Retrieved {len(results)} chunks.")
+	#step 8: print what happened, useful for debugging
+	source_list=[]
+	for doc in final_chunks:
+		name=os.path.basename(doc['path'])
+		if name not in source_list:
+			source_list.append(name)
+
+	print("\nQuery: ", question)
+	print("Relevant chunks: ", len(final_chunks))
+	if source_list:
+		print("Sources: ", ",".join(source_list))
+	else:
+		print("Sources: None")
+	
+	return final_chunks					
+

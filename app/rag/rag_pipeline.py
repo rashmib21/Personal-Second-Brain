@@ -32,16 +32,15 @@ def ask(question):
 			if fn.lower() in question_lower:
 				return f"Yes, '{fn}' is indexed in your Personal Second Brain.", [fn], 1
 
-		if file_names:
-			return f"The following files are indexed in your Personal Second Brain: {', '.join(file_names)}", file_names, len(file_names)
-
+		
 	# Step 2: Perform vector search
 	results = search(question)
-	num_chunks = len(results)
+	
 
 	# Retrieval decision determined by Python BEFORE calling Ollama
-	if not results or num_chunks == 0:
+	if not results:
 		return "Not found in the retrieved source.", [], 0
+	num_chunks = len(results)
 
 	# Step 3: Build context string and collect source filenames from python results
 	context_list = []
