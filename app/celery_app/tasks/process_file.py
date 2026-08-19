@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
 )
+
 def route_file(self, event):
     path = event["path"]
     file_type = event["file_type"]
@@ -42,56 +43,96 @@ def route_file(self, event):
 
     chunks = []
 
-    # Case 1: PDF extraction returned structured dict with page dictionaries or raw page list
-    pages = []
-    if isinstance(extracted_data, dict) and extracted_data.get("pages"):
-        pages = extracted_data["pages"]
-    elif isinstance(extracted_data, list):
-        pages = extracted_data
+    #------------------------
+    #Image file
+    #------------------------
+    if file_type=='image':
+        text_content=""
 
-    if pages:
-        for page_info in pages:
-            if isinstance(page_info, dict):
-                page_num = page_info.get("page", 1)
-                page_text = page_info.get("text", "")
-
-                page_chunks = chunk_text(page_text)
-                for c in page_chunks:
-                    header = f"File: {filename} | Page: {page_num}"
-                    chunks.append(f"{header}\n{c}")
-
-    # Case 2: Standard structured dict or string return
-    else:
-        text_content = ""
         if isinstance(extracted_data, dict):
-            text_content = extracted_data.get("transcript") or extracted_data.get("text", "")
+            text_content=extracted_data.get("text","")
         else:
-            text_content = str(extracted_data)
-
-        text_chunks = chunk_text(text_content)
+            text_content=str(extracted_data)
+        text_chunks=chunk_text(text_content)
+        
+        #If image has OCR/face information, create a searchable chunk
         for c in text_chunks:
             chunks.append(f"File: {filename}\n{c}")
 
-    # If extraction yielded no text chunks, do NOT create dummy chunks or LanceDB records
-    if not chunks:
-        logger.info(f"No text chunks created for {filename}")
-        save_file_hash(file_hash=file_hash, path=path)
-        return {"status": "NO_TEXT_EXTRACTED", "path": path, "total_chunks": 0}
+        #if there is no OCR text, still keep one image record so the actual image embedding can be stored later.
+        if not chunks:
+            chunks.append(f"File: {filename}\nImage")
+        logger.info(f"Created {len(chunks)} image chunk(s) for {filename}")        
 
-    logger.info(f"Created {len(chunks)} chunks for {filename}")
 
-    # Generate vector embeddings and save to LanceDB
-    for chunk in chunks:
-        chunk_id = str(uuid.uuid4())
-        embedding = generate_embedding(file_type, chunk)
-
+        #Generate image embedding using actual image path
+          
+        chunk_id=str(uuid.uuid4())
+        embedding=generate_embedding(file_type,path)
         store_chunk(
-            chunk_id=chunk_id,
-            path=path,
-            file_type=file_type,
-            text=chunk,
-            embedding=embedding
+                chunk_id=chunk_id,
+                path=path,
+                file_type=file_type,
+                text="\n".join(chunks),
+                embedding=embedding
         )
+    #------------------------        
+    #PDF/Other paged documents        
+    #------------------------
+    else:        
+
+
+
+        # Case 1: PDF extraction returned structured dict with page dictionaries or raw page list
+        pages = []
+        if isinstance(extracted_data, dict) and extracted_data.get("pages"):
+            pages = extracted_data["pages"]
+        elif isinstance(extracted_data, list):
+            pages = extracted_data
+
+        if pages:
+            for page_info in pages:
+                if isinstance(page_info, dict):
+                    page_num = page_info.get("page", 1)
+                    page_text = page_info.get("text", "")
+
+                    page_chunks = chunk_text(page_text)
+                    for c in page_chunks:
+                        header = f"File: {filename} | Page: {page_num}"
+                        chunks.append(f"{header}\n{c}")
+
+        # Case 2: Standard structured dict or string return
+        else:
+            text_content = ""
+            if isinstance(extracted_data, dict):
+                text_content = extracted_data.get("transcript") or extracted_data.get("text", "")
+            else:
+                text_content = str(extracted_data)
+
+            text_chunks = chunk_text(text_content)
+            for c in text_chunks:
+                chunks.append(f"File: {filename}\n{c}")
+
+        # If extraction yielded no text chunks, do NOT create dummy chunks or LanceDB records
+        if not chunks:
+            logger.info(f"No text chunks created for {filename}")
+            save_file_hash(file_hash=file_hash, path=path)
+            return {"status": "NO_TEXT_EXTRACTED", "path": path, "total_chunks": 0}
+
+        logger.info(f"Created {len(chunks)} chunks for {filename}")
+
+        # Generate vector embeddings and save to LanceDB
+        for chunk in chunks:
+            chunk_id = str(uuid.uuid4())
+            embedding = generate_embedding(file_type, chunk)
+
+            store_chunk(
+                chunk_id=chunk_id,
+                path=path,
+                file_type=file_type,
+                text=chunk,
+                embedding=embedding
+            )
 
     # Save hash to avoid re-processing same file
     save_file_hash(file_hash=file_hash, path=path)
