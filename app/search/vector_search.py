@@ -2,9 +2,9 @@ import os
 import re
 from rank_bm25 import BM25Okapi
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
-from app.storage.lancedb_store import get_table
+from app.storage.lancedb_store import get_table, get_image_table
 from app.embeddings.embedding_router import generate_embedding
-
+from app.embeddings.image_embedding import embed_image
 
 #takes a question and one chunk of text together as a pair, and directly outputs how relevant that chunk actually is to the question — instead of comparing separate embeddings or matching separate words, it reads both at once and judges the match itself.
 from sentence_transformers import CrossEncoder 
@@ -251,3 +251,33 @@ def search(question, max_results=10):
 	
 	return final_chunks					
 
+#------Image Search-----------
+def search_images(image_path, max_results=10):
+	#Search images using CLIP image embeddings.
+	#image_path: path of the query image.
+	#returns: most visually similar images from image_documents.
+
+	image_table=get_image_table()
+
+	if image_table is None:
+		print("Image table is not available")
+		return []
+
+	#Generate 512-D CLIP embedding for query image
+	query_embedding=embed_image(image_path)
+
+	#Search only inside image_documents
+	results=(
+			image_table
+			.search(query_embedding)
+			.metric("cosine")
+			.limit(max_results)
+			.to_list()
+	)
+
+	print("\nImage Query: ",image_path)
+	print("Relevant images: ", len(results))
+
+	for result in results:
+		print("Source: ",os.path.basename(result['path']))
+	return results	
