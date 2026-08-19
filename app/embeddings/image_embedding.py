@@ -17,8 +17,8 @@ def embed_image(image_path):
 	return embedding.tolist()
 
 # #Testing
-# if __name__=="__main__":
-# 	image_path="watched_folder/passport_size.png"
-# 	embedding=embed_image(image_path)
-# 	print(f"Embedding Dimension: {len(embedding)}")
-# 	print(embedding)
+if __name__=="__main__":
+	image_path="watched_folder/ChatGPT Image Jul 29, 2026, 03_10_26 PM.png"
+	embedding=embed_image(image_path)
+	print(f"Embedding Dimension: {len(embedding)}")
+	print(embedding)
