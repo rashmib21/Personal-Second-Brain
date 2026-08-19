@@ -4,9 +4,10 @@ import os
 import uuid
 
 from app.extractors.router import extract_file
-from app.storage.lancedb_store import save_file_hash, is_file_processed, store_chunk
+from app.storage.lancedb_store import save_file_hash, is_file_processed, store_chunk, store_image_chunk
 from app.embeddings.embedding_router import generate_embedding
 from app.chunker.chunker import chunk_text
+from app.embeddings.image_embedding import embed_image
 
 logger = logging.getLogger(__name__)
 
@@ -64,17 +65,16 @@ def route_file(self, event):
             chunks.append(f"File: {filename}\nImage")
         logger.info(f"Created {len(chunks)} image chunk(s) for {filename}")        
 
-
-        #Generate image embedding using actual image path
-          
+        #generate 512-D CLIP Image embedding
+        image_embedding=embed_image(path)
+ 
         chunk_id=str(uuid.uuid4())
-        embedding=generate_embedding(file_type,path)
         store_chunk(
                 chunk_id=chunk_id,
                 path=path,
                 file_type=file_type,
                 text="\n".join(chunks),
-                embedding=embedding
+                image_embedding=image_embedding
         )
     #------------------------        
     #PDF/Other paged documents        
