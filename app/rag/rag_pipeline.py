@@ -3,7 +3,9 @@ from app.search.vector_search import search
 from app.llm.ollama_client import ask_llama
 from app.llm.gemini_client import ask_gemini
 from app.storage.lancedb_store import get_hash_table
-
+from app.query.query_analyzer import analyze_query
+from app.llm.summary_client import summarize_text
+from app.search.summary_search import search_for_summary
 
 def ask(question):
 	"""
@@ -34,8 +36,13 @@ def ask(question):
 
 		
 	# Step 2: Perform vector search
-	results = search(question)
-	
+	analysis = analyze_query(question)
+	# print("QUERY ANALYSIS:", analysis)
+
+	if analysis["intent"] == "summarization":
+	    results = search_for_summary(question)
+	else:
+	    results = search(question)
 
 	# Retrieval decision determined by Python BEFORE calling Ollama
 	if not results:
@@ -53,6 +60,23 @@ def ask(question):
 
 	sources = sorted(list(retrieved_sources))
 	context_str = "\n\n".join(context_list)
+
+	if analysis["intent"] == "summarization":
+	    answer = summarize_text(context_str)
+	    return answer, sources, num_chunks
+
+	# print("\n===== RETRIEVED CONTEXT =====")
+	# for i, doc in enumerate(results, 1):
+	#     print(f"\n--- Chunk {i} ---")
+	#     print("Source:", os.path.basename(doc["path"]))
+	#     print(doc["text"])
+	# print("\n============================")
+
+	# Summarization queries use the same retrieved chunks
+	# but a dedicated summarization prompt.
+	if analysis["intent"] == "summarization":
+		answer = summarize(question, context_str)
+		return answer, sources, num_chunks
 
 	# Step 4: Build prompt for LLM
 	prompt = f"""You are a Personal Second Brain Assistant.
@@ -84,6 +108,33 @@ Answer:"""
 
 	return answer, sources, num_chunks
 
+def summarize(question, context):
+    prompt = f"""You are a Personal Second Brain Assistant.
+
+Summarize the retrieved content according to the user's request.
+
+Rules:
+- Use ONLY the retrieved context.
+- Do not add information that is not present in the context.
+- Keep the summary clear and concise.
+- If the context does not contain enough information, say:
+  "Not enough information found in the retrieved source."
+
+Retrieved Context:
+{context}
+
+User Request:
+{question}
+
+Summary:"""
+
+    try:
+        return ask_llama(prompt)
+    except Exception:
+        try:
+            return ask_gemini(prompt)
+        except Exception as e:
+            return f"LLM Error: {str(e)}"
 
 def format_response(answer, sources, num_chunks=0):
 	"""
