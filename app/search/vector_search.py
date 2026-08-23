@@ -4,7 +4,7 @@ from rank_bm25 import BM25Okapi
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from app.storage.lancedb_store import get_table, get_image_table
 from app.embeddings.embedding_router import generate_embedding
-from app.embeddings.image_embedding import embed_image
+from app.embeddings.image_embedding import embed_image, get_clip_model
 
 #takes a question and one chunk of text together as a pair, and directly outputs how relevant that chunk actually is to the question — instead of comparing separate embeddings or matching separate words, it reads both at once and judges the match itself.
 from sentence_transformers import CrossEncoder 
