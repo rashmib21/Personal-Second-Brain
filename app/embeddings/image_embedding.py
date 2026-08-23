@@ -1,5 +1,11 @@
+import warnings
 from PIL import Image
+from transformers import logging as tf_logging
 from sentence_transformers import SentenceTransformer
+
+# Suppress Hugging Face transformers warnings regarding slow image processor defaults
+tf_logging.set_verbosity_error()
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 _clip_model = None
 
