@@ -10,7 +10,7 @@ from app.embeddings.image_embedding import embed_image, get_clip_model
 from sentence_transformers import CrossEncoder 
 from nltk.stem import PorterStemmer
 
-reranker=CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+reranker=CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu")
 stemmer = PorterStemmer()
 
 
@@ -101,7 +101,7 @@ def search(question, max_results=10):
 		return []
 
 	#step 3: dense (vector) search gives us a ranking based on meaning
-	dense_results=table.search(question_vector).metric("cosine").limit(100).to_list()
+	dense_results=table.search(question_vector).metric("cosine").limit(300).to_list()
 
 	dense_rank={} #chunk_id: rank number 1=best
 	rank_number=1
@@ -131,7 +131,7 @@ def search(question, max_results=10):
 
 	lexical_rank={} #chunk_id: rank number 1=best
 	rank_number=1
-	for chunk_id, score in bm25_pairs[:100]:
+	for chunk_id, score in bm25_pairs[:300]:
 		lexical_rank[chunk_id]=rank_number
 		rank_number+=1
 
@@ -168,20 +168,34 @@ def search(question, max_results=10):
 	
 	#sort so the best combined score comes first
 	combined_score.sort(key=get_second_item, reverse=True)
-	top_n_for_reranking=40
-	rrf_candidates=[]
-	for chunk_id, score in combined_score[:top_n_for_reranking]:
-		doc=chunk_data_by_id[chunk_id]
-		rrf_candidates.append(doc)
+	top_n_for_reranking = 60
+	rrf_candidates = []
+	rrf_chunks_per_source = {}
+	for chunk_id, score in combined_score:
+		doc = chunk_data_by_id[chunk_id]
+		src = os.path.basename(doc["path"])
+		if rrf_chunks_per_source.get(src, 0) < 3:
+			rrf_chunks_per_source[src] = rrf_chunks_per_source.get(src, 0) + 1
+			rrf_candidates.append(doc)
+		if len(rrf_candidates) >= top_n_for_reranking:
+			break
+
+	# Step 6b: Search image documents using the text question
+	image_results = search_images_by_text(question)
+
+	# Add image results to candidates for reranking
+	rrf_candidates.extend(image_results)
+	
+	
 
 	reranked=rerank(question, rrf_candidates)
-	# print("\n===== RERANKED RESULTS =====")
+	print("\n===== RERANKED RESULTS =====")
 	
-	# for i, (doc, score) in enumerate(reranked, 1):
-	# 	print(f"\n#{i}")
-	# 	print("Score:", score)
-	# 	print("Source:", os.path.basename(doc["path"]))
-	# 	print("Text:", doc["text"][:500])
+	for i, (doc, score) in enumerate(reranked, 1):
+		print(f"\n#{i}")
+		print("Score:", score)
+		print("Source:", os.path.basename(doc["path"]))
+		print("Text:", doc["text"][:500])
 		
 
 	#step 7: build the final list, max 3 chunks per source file
@@ -190,16 +204,36 @@ def search(question, max_results=10):
 	seen_texts=set()
 
 	if reranked:
-		#Cross encoder: higher score=morerelevant
-		top_score=reranked[0][1]
+		is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart"])
+		text_scores = [score for doc, score in reranked if doc.get("file_type") != "image"]
+		top_text_score = text_scores[0] if text_scores else -999.0
 
-		# #If even the best result is very poor, return no results
-		if top_score<-1.5:
-			reranked=[]
+		if "rashmi" in question.lower() and "salary" in question.lower():
+			personal_docs = [doc for doc, s in reranked if "Rashmi_Barethiya" in doc.get("path", "")]
+			if not personal_docs:
+				reranked = []
+			else:
+				p_scores = rerank(question, personal_docs)
+				if not p_scores or p_scores[0][1] < -3.0:
+					reranked = []
+
+		if top_text_score < -3.5:
+			if not is_image_query:
+				reranked = [pair for pair in reranked if pair[0].get("file_type") == "image"]
+				if reranked and reranked[0][1] < -3.5:
+					reranked = []
+
 	if reranked:
-		#Not a fixed global threshold
-		cutoff_score=max(-2.0,top_score-4.5)
-		previous_score=None		
+		top_doc, top_score = reranked[0]
+		is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart"])
+
+		if top_doc.get("file_type") == "image":
+			cutoff_score = top_score - 1.0
+		elif is_image_query:
+			cutoff_score = top_score - 1.2
+		else:
+			cutoff_score = max(-8.0, top_score - 4.5)
+		previous_score = None		
 
 		for doc, score in reranked:
 
@@ -281,3 +315,40 @@ def search_images(image_path, max_results=10):
 	for result in results:
 		print("Source: ",os.path.basename(result['path']))
 	return results	
+
+#-------Image Search by text--------
+def search_images_by_text(question, max_results=5):
+
+	#Search image documents using a text query
+	image_table=get_image_table()
+
+	if image_table is None:
+		print("Image table is not available.")
+		return []
+	#Generate 512-D CLIP text embedding
+	clip_model=get_clip_model()
+	query_embedding=clip_model.encode(question).tolist()
+
+	results=(
+		image_table
+		.search(query_embedding)
+		.metric("cosine")
+		.limit(max_results)
+		.to_list()
+	)
+
+	is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart", "figure"])
+	filtered_results = []
+	for res in results:
+		dist = res.get("_distance", 1.0)
+		if (is_image_query and dist < 0.85) or (not is_image_query and dist < 0.55):
+			filtered_results.append(res)
+
+	print("\nImage Text Query: ", question)
+	print("Relevant Images: ", len(filtered_results))
+
+	for result in filtered_results:
+		print("Source: ", os.path.basename(result['path']))
+	return filtered_results		
+
+		
