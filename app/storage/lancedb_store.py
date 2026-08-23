@@ -97,9 +97,8 @@ def save_file_hash(file_hash, path):
 	print(f"Saved hash: {file_hash}")
 
 #Store one chunk
-def store_chunk(chunk_id,path, file_type, text, embedding):
+def store_chunk(chunk_id, path, file_type, text, embedding):
 	#Store one document chunk into LanceDB.
-	#	
 	
 	table.add([
 		{
@@ -107,7 +106,7 @@ def store_chunk(chunk_id,path, file_type, text, embedding):
 			"path":path,
 			"file_type":file_type,
 			"text":text,
-			"embedding":embedding,
+			"embedding":embedding
 		}
 	])
 
