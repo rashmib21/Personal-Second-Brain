@@ -69,7 +69,7 @@ def route_file(self, event):
         image_embedding=embed_image(path)
  
         chunk_id=str(uuid.uuid4())
-        store_chunk(
+        store_image_chunk(
                 chunk_id=chunk_id,
                 path=path,
                 file_type=file_type,
