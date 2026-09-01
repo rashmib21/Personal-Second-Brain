@@ -41,68 +41,80 @@ def prepare_image_for_vlm(image_path, max_size=768):
 
 
 def summarize_image(image_path, question=None):
-	prepared_image, temporary_file = prepare_image_for_vlm(image_path)
-	"""
-		Summarize or answer questions about an image using Qwen2.5-VL
-		Works for:
-			-images contains text
-			-images without text
-			-images containing both text and visual information
-	"""
-	try:
-		if question and question.strip():
-			prompt = f"""You are a Vision Language Assistant.
-Answer the user's question based strictly on the content (both text and visual elements) present in the provided image.
+    """
+    Analyze an image using Qwen2.5-VL.
 
-User Question: {question.strip()}
+    - If a question is provided, answer that question.
+    - If no question is provided, generate a general image summary.
+    """
+
+    prepared_image, temporary_file = prepare_image_for_vlm(image_path)
+
+    try:
+        if question and question.strip():
+
+            prompt = f"""You are a Vision Language Assistant.
+
+Analyze the provided image carefully and answer the following question based ONLY
+on what is actually visible in the image.
+
+User Question:
+{question.strip()}
 
 Rules:
-- Answer ONLY what the user asked.
-- Be direct, concise, and specific.
-- Do NOT describe the rest of the image unless explicitly asked.
-- If the question asks for a title, list of jobs, specific skills, or responsibilities, extract and return only that specific information.
-- If the requested information is not present in the image, reply: "Information not found in the image."
+- Answer ONLY the question asked.
+- Do not provide unrelated information.
+- Do not guess or invent information.
+- If the requested information is not visible in the image, say:
+  "Information not found in the image."
+- For YES/NO questions, answer ONLY:
+  YES
+  or
+  NO
 
 Answer:"""
-		else:
-			prompt = """
-		Analyze this image and provide a clear, concise summary.
 
-		If the image contains text:
-		- Read the important text.
-		- Include important names, titles, numbers, dates, and facts.
+        else:
 
-		If the image contains no text:
-		- Describe the important visual content.
-		- Identify the main objects, people, scene, diagram, chart, or other relevant elements.
+            prompt = """Analyze this image and provide a clear, concise summary.
 
-		If the image contains both text and visual information:
-		- Combine the important textual and visual information.
+If the image contains text:
+- Read the important text.
+- Include important names, titles, numbers, dates, and facts.
 
-		Rules:
-		- Do not invent information.
-		- Only describe information that can be observed in the image.
-	"""
+If the image contains no text:
+- Describe the important visual content.
+- Identify the main objects, people, scene, diagram, chart, or other relevant elements.
 
-		response = ollama.chat(
-			model="qwen2.5vl:3b",
-			options={
-				"num_ctx": 4096,
-				"num_gpu": 0
-			},
-			messages=[
-				{
-					"role": "user",
-					"content": prompt,
-					"images": [prepared_image]
-				}
-			]
-		)
+If the image contains both text and visual information:
+- Combine the important textual and visual information.
 
-		return response['message']['content']
-	finally:
-		if temporary_file and os.path.exists(temporary_file):
-			try:
-				os.remove(temporary_file)
-			except Exception:
-				pass
+Rules:
+- Do not invent information.
+- Only describe information that can actually be observed in the image.
+"""
+
+        response = ollama.chat(
+            model="qwen2.5vl:3b",
+            options={
+                "num_ctx": 4096,
+                "num_gpu": 0
+            },
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [prepared_image]
+                }
+            ]
+        )
+
+        return response["message"]["content"].strip()
+
+    finally:
+
+        if temporary_file and os.path.exists(temporary_file):
+            try:
+                os.remove(temporary_file)
+            except Exception:
+                pass
