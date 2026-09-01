@@ -7,6 +7,7 @@ from app.query.query_analyzer import analyze_query
 from app.llm.summary_client import summarize_text
 from app.search.summary_search import search_for_summary, search_for_book_summary
 from app.rag.image_summarizer import summarize_image
+from app.search.object_search import search_images_by_object
 
 def is_image_list_query(question):
 	question_lower = question.lower()
@@ -26,6 +27,26 @@ def is_image_list_query(question):
 	return any(phrase in question_lower for phrase in phrases)
 
 
+def is_object_search_query(question):
+    question_lower = question.lower()
+
+    phrases = [
+        "find images containing",
+        "find images with",
+        "show images containing",
+        "show images with",
+        "images containing",
+        "images with",
+        "which images contain",
+        "which images have",
+        "find a picture of",
+        "find pictures of",
+        "find photos of",
+        "show me images containing",
+        "show me images with"
+    ]
+
+    return any(phrase in question_lower for phrase in phrases)
 
 
 def ask(question):
@@ -78,6 +99,34 @@ def ask(question):
 			answer += f"{i}. {name}\n"
 
 		return answer, image_names, len(image_names)
+
+	    # Step 1.6: Check for object-based image search
+    if is_object_search_query(question):
+
+        results = search_images_by_object(question)
+
+        if not results:
+            return (
+                "No indexed image was found containing the requested object.",
+                [],
+                0
+            )
+
+        sources = sorted(
+            list(
+                set(
+                    os.path.basename(result["path"])
+                    for result in results
+                )
+            )
+        )
+
+        answer = "Images containing the requested object:\n"
+
+        for i, source in enumerate(sources, 1):
+            answer += f"{i}. {source}\n"
+
+        return answer, sources, len(results)	
 
 	# Step 2: Perform vector search
 	analysis = analyze_query(question)
