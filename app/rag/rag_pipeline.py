@@ -5,7 +5,7 @@ from app.llm.gemini_client import ask_gemini
 from app.storage.lancedb_store import get_hash_table
 from app.query.query_analyzer import analyze_query
 from app.llm.summary_client import summarize_text
-from app.search.summary_search import search_for_summary
+from app.search.summary_search import search_for_summary, search_for_book_summary
 
 def ask(question):
 	"""
@@ -40,7 +40,11 @@ def ask(question):
 	# print("QUERY ANALYSIS:", analysis)
 
 	if analysis["intent"] == "summarization":
-	    results = search_for_summary(question)
+		if analysis.get("chapter"):
+			results = search_for_summary(question)
+
+		else:
+			results = search_for_book_summary(question)
 	else:
 	    results = search(question)
 
