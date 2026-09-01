@@ -101,18 +101,17 @@ def ask(question):
 		return answer, image_names, len(image_names)
 
 	    # Step 1.6: Check for object-based image search
-    if is_object_search_query(question):
+	if is_object_search_query(question):
+		results = search_images_by_object(question)
 
-        results = search_images_by_object(question)
-
-        if not results:
-            return (
+		if not results:
+			return (
                 "No indexed image was found containing the requested object.",
                 [],
                 0
             )
 
-        sources = sorted(
+		sources = sorted(
             list(
                 set(
                     os.path.basename(result["path"])
@@ -121,12 +120,12 @@ def ask(question):
             )
         )
 
-        answer = "Images containing the requested object:\n"
+		answer = "Images containing the requested object:\n"
 
-        for i, source in enumerate(sources, 1):
-            answer += f"{i}. {source}\n"
+		for i, source in enumerate(sources, 1):
+			answer += f"{i}. {source}\n"
 
-        return answer, sources, len(results)	
+		return answer, sources, len(results)	
 
 	# Step 2: Perform vector search
 	analysis = analyze_query(question)
