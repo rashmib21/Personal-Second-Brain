@@ -4,6 +4,41 @@ import tempfile
 import os
 
 
+def prepare_image_for_vlm(image_path, max_size=768):
+	"""
+	Prepare an image for Qwen2.5-VL.
+
+	- Small images are used directly.
+	- Large images are resized temporarily.
+	- Original image is never modified.
+	"""
+
+	image = Image.open(image_path)
+
+	# If image is already small enough, use original
+	if image.width <= max_size and image.height <= max_size:
+		return image_path, None
+
+	# Create resized copy
+	image.thumbnail((max_size, max_size))
+
+	# Temporary file
+	temp_file = tempfile.NamedTemporaryFile(
+		suffix=".jpg",
+		delete=False
+	)
+	temp_path = temp_file.name
+	temp_file.close()
+
+	# Convert to RGB because JPEG doesn't support some image modes
+	if image.mode != "RGB":
+		image = image.convert("RGB")
+
+	image.save(temp_path, format="JPEG", quality=85)
+
+	return temp_path, temp_path
+
+
 def summarize_image(image_path):
 	"""
 		Summarize an image using Qwen2.5-VL
@@ -12,7 +47,7 @@ def summarize_image(image_path):
 			-images without text
 			-images containing both text and visual information
 	"""
-	
+
 	prompt="""
 		Analyze this image and provide a clear, concise summary.
 
