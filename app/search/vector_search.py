@@ -78,7 +78,63 @@ def rerank(question, candidate_chunks):
 	
 	return scored_chunks		
 
+def is_image_question(question):
+	question_lower = question.lower()
+	image_words = [
+		"image",
+		"picture",
+		"photo",
+		"visual",
+		"diagram",
+		"chart",
+		"figure",
+
+		"in the image",
+		"in this image",
+		"from the image",
+		"from this image",
+		"shown in the image",
+		"shown in this image",
+		"shown in the picture",
+		"shown in this picture",
+		"according to the image",
+		"according to this image",
+		"mentioned in the image",
+		"mentioned in this image",
+
+		"what is happening",
+		"what does the image show",
+		"what information is shown",
+		"describe the image",
+	    "describe this image",
+
+		"which job",
+		"which jobs",
+		"what job",
+		"what jobs",
+	]
+
+	return any(word in question_lower for word in image_words)
+
 def search(question, max_results=10):
+
+	# Check whether this is an image-related question
+	if is_image_question(question):
+		print("\n===== IMAGE QUERY DETECTED =====")
+
+		image_results = search_images_by_text(question)
+
+		if not image_results:
+			print("No relevant image found.")
+			return []
+
+		print("\n===== IMAGE RESULTS =====")
+
+		for result in image_results:
+			print("Source:", os.path.basename(result["path"]))
+
+		return image_results
+
 	table=get_table()
 	if table is None:
 		print("LanceDB table is not available")
@@ -180,22 +236,17 @@ def search(question, max_results=10):
 		if len(rrf_candidates) >= top_n_for_reranking:
 			break
 
-	# Step 6b: Search image documents using the text question
-	image_results = search_images_by_text(question)
-
-	# Add image results to candidates for reranking
-	rrf_candidates.extend(image_results)
 	
 	
 
 	reranked=rerank(question, rrf_candidates)
 	print("\n===== RERANKED RESULTS =====")
 	
-	for i, (doc, score) in enumerate(reranked, 1):
-		print(f"\n#{i}")
-		print("Score:", score)
-		print("Source:", os.path.basename(doc["path"]))
-		print("Text:", doc["text"][:500])
+	# for i, (doc, score) in enumerate(reranked, 1):
+		# print(f"\n#{i}")
+		# print("Score:", score)
+		# print("Source:", os.path.basename(doc["path"]))
+		# print("Text:", doc["text"][:500])
 		
 
 	#step 7: build the final list, max 3 chunks per source file
@@ -277,11 +328,11 @@ def search(question, max_results=10):
 			source_list.append(name)
 
 	print("\nQuery: ", question)
-	print("Relevant chunks: ", len(final_chunks))
-	if source_list:
-		print("Sources: ", ",".join(source_list))
-	else:
-		print("Sources: None")
+	# print("Relevant chunks: ", len(final_chunks))
+	# if source_list:
+	# 	print("Sources: ", ",".join(source_list))
+	# else:
+	# 	print("Sources: None")
 	
 	return final_chunks					
 
@@ -325,6 +376,7 @@ def search_images_by_text(question, max_results=5):
 	if image_table is None:
 		print("Image table is not available.")
 		return []
+
 	#Generate 512-D CLIP text embedding
 	clip_model=get_clip_model()
 	query_embedding=clip_model.encode(question).tolist()
@@ -336,19 +388,19 @@ def search_images_by_text(question, max_results=5):
 		.limit(max_results)
 		.to_list()
 	)
-
-	is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart", "figure"])
-	filtered_results = []
-	for res in results:
-		dist = res.get("_distance", 1.0)
-		if (is_image_query and dist < 0.85) or (not is_image_query and dist < 0.55):
-			filtered_results.append(res)
+	filtered_results = results
+	# is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart", "figure"])
+	# filtered_results = []
+	# for res in results:
+	# 	dist = res.get("_distance", 1.0)
+	# 	if (is_image_query and dist < 0.85) or (not is_image_query and dist < 0.55):
+	# 		filtered_results.append(res)
 
 	print("\nImage Text Query: ", question)
 	print("Relevant Images: ", len(filtered_results))
 
-	for result in filtered_results:
+	for result in results:
 		print("Source: ", os.path.basename(result['path']))
-	return filtered_results		
+	return results		
 
 		
