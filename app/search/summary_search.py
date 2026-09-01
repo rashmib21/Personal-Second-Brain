@@ -452,3 +452,62 @@ def search_for_summary(question, max_chunks=30):
     # )
 
     return results
+
+#------summary of whole book------------
+def search_for_book_summary(question, max_chunks=None):
+    #Retrieve all useful chunks from a document for whole book summarization
+    #get lancedb table
+    table=get_table()
+    if table is None:
+        return []
+    df=table.to_pandas()
+    
+    if df.empty:
+        return []
+
+    #find the document with user's question
+    source_path=find_document(question, df)
+
+    if source_path is None:
+        return []
+
+    #Keep only requested document
+    document_df=df[
+        df['path']==source_path]    
+
+
+    if document_df.empty:
+        return []
+
+    #Sort chunks
+    if "chunk_index" in document_df.columns:
+        document_df=document_df.sort_values("chunk_index")
+
+    #Convert rows
+    rows=list(document_df.itertuples(index=False))
+
+    #Collect useful chunks
+    results=[]
+    for row in rows:
+        text=str(row.text)
+
+        #Ignore empty chunks
+        if not text.strip():
+            continue
+
+        #Ignore TOC/index/bibliography
+        if is_toc_chunk(text):
+            continue 
+
+        results.append({
+                "chunk_id":row.chunk_id,
+                "path":row.path,
+                "file_type":row.file_type,
+                "text":text
+            })
+
+        #Safety limit
+        if(max_chunks is not None and len(results)>=max_chunks):
+            break
+
+    return results                           
