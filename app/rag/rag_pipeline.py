@@ -2,10 +2,31 @@ import os
 from app.search.vector_search import search
 from app.llm.ollama_client import ask_llama
 from app.llm.gemini_client import ask_gemini
-from app.storage.lancedb_store import get_hash_table
+from app.storage.lancedb_store import get_hash_table, get_image_table
 from app.query.query_analyzer import analyze_query
 from app.llm.summary_client import summarize_text
 from app.search.summary_search import search_for_summary, search_for_book_summary
+from app.rag.image_summarizer import summarize_image
+
+def is_image_list_query(question):
+	question_lower = question.lower()
+
+	phrases = [
+		"list all images",
+		"list out all images",
+		"list the images",
+		"what images do you have",
+		"which images do you have",
+		"show all images",
+		"show me all images",
+		"all images",
+		"images do you have"
+	]
+
+	return any(phrase in question_lower for phrase in phrases)
+
+
+
 
 def ask(question):
 	"""
@@ -34,7 +55,30 @@ def ask(question):
 			if fn.lower() in question_lower:
 				return f"Yes, '{fn}' is indexed in your Personal Second Brain.", [fn], 1
 
-		
+	if is_image_list_query(question):
+		image_table = get_image_table()
+
+		if image_table is None:
+			return "No images are indexed.", [], 0
+
+		image_df = image_table.to_pandas()
+
+		if image_df.empty:
+			return "No images are indexed.", [], 0
+
+		image_paths = image_df["path"].tolist()
+
+		image_names = sorted(
+		    list(set(os.path.basename(path) for path in image_paths))
+		)
+
+		answer = "Images in your Personal Second Brain:\n"
+
+		for i, name in enumerate(image_names, 1):
+			answer += f"{i}. {name}\n"
+
+		return answer, image_names, len(image_names)
+
 	# Step 2: Perform vector search
 	analysis = analyze_query(question)
 	# print("QUERY ANALYSIS:", analysis)
@@ -51,6 +95,19 @@ def ask(question):
 	# Retrieval decision determined by Python BEFORE calling Ollama
 	if not results:
 		return "Not found in the retrieved source.", [], 0
+	# Handle image results using Qwen2.5-VL
+	if results and results[0].get("file_type") == "image":
+	    image_path = results[0]["path"]
+
+	    try:
+	        answer = summarize_image(image_path, question)
+	    except Exception as e:
+	        answer = f"Image VLM Error: {str(e)}"
+
+	    sources = [os.path.basename(image_path)]
+
+	    return answer, sources, len(results)
+
 	num_chunks = len(results)
 
 	# Step 3: Build context string and collect source filenames from python results
@@ -160,9 +217,42 @@ def format_response(answer, sources, num_chunks=0):
 
 if __name__ == "__main__":
 	while True:
+		print("\n" + "=" * 75)
+
 		question = input("\nAsk: ")
 		if question.lower() == "exit":
 			break
+		if not question.strip():
+			continue
+
 
 		answer, sources, num_chunks = ask(question)
-		print("\n" + format_response(answer, sources, num_chunks))
+		print("\n┌" + "─" * 70 + "┐")
+
+		print("│ QUESTION")
+		print("│ " + question)
+
+		print("│")
+
+		print("│ ANSWER")
+		for line in answer.split("\n"):
+			print("│ " + line)
+
+		print("│")
+
+		print("│ SOURCE")
+
+		if not sources or num_chunks == 0:
+			print("│ No relevant source found.")
+
+		else:
+			for source in sources:
+				print("│ " + source)
+
+		print("│")
+
+		print("│ RELEVANT CHUNKS")
+		print("│ " + str(num_chunks))
+
+		print("└" + "─" * 70 + "┘")
+		# print("\n" + format_response(answer, sources, num_chunks))
