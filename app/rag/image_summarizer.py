@@ -5,6 +5,7 @@ import os
 
 
 def prepare_image_for_vlm(image_path, max_size=768):
+
 	"""
 	Prepare an image for Qwen2.5-VL.
 
@@ -40,6 +41,7 @@ def prepare_image_for_vlm(image_path, max_size=768):
 
 
 def summarize_image(image_path):
+	prepared_image, temporary_file = prepare_image_for_vlm(image_path)
 	"""
 		Summarize an image using Qwen2.5-VL
 		Works for:
@@ -70,13 +72,14 @@ def summarize_image(image_path):
 	response=ollama.chat(
 		model="qwen2.5vl:3b",
 		options={
-			"num_ctx":8192
+			"num_ctx":4096,
+			"num_gpu":0
 		},
 		messages=[
 			{
 				"role":"user",
 				"content":prompt,
-				"images":[image_path]
+				"images":[prepared_image]
 			}
 		]
 	)
