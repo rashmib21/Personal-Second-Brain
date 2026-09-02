@@ -28,9 +28,10 @@ def is_image_list_query(question):
 
 
 def is_object_search_query(question):
-    question_lower = question.lower()
+    question_lower = question.lower().strip()
 
     phrases = [
+        # Existing patterns
         "find images containing",
         "find images with",
         "show images containing",
@@ -43,7 +44,29 @@ def is_object_search_query(question):
         "find pictures of",
         "find photos of",
         "show me images containing",
-        "show me images with"
+        "show me images with",
+        # Visual condition, multi-object & relationship patterns
+        "image in which",
+        "images in which",
+        "image where",
+        "images where",
+        "image showing",
+        "images showing",
+        "list the name of image",
+        "list the names of images",
+        "which image has",
+        "which images have",
+        "which image contains",
+        "which images contain",
+        "which image shows",
+        "which images show",
+        "find images where",
+        "find image where",
+        "find image containing",
+        "find image with",
+        "find a photo of",
+        "show image containing",
+        "show image with"
     ]
 
     return any(phrase in question_lower for phrase in phrases)
