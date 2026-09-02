@@ -10,6 +10,7 @@ DB_PATH = os.path.join(BASE_DIR, "database")
 TABLE_NAME="documents"
 HASH_TABLE_NAME="processed_files"
 IMAGE_TABLE_NAME = "image_documents"
+FACE_TABLE_NAME = "face_embeddings"
 
 
 #create database folder if it doesn't exists
@@ -62,6 +63,24 @@ def get_image_table():
 	)					
 
 
+#-----Face Embeddings Table------
+def get_face_table():
+	if FACE_TABLE_NAME in db.list_tables().tables:
+		return db.open_table(FACE_TABLE_NAME)
+
+	schema = pa.schema([
+		pa.field("face_id", pa.string()),
+		pa.field("image_path", pa.string()),
+		pa.field("bbox", pa.list_(pa.int32(), 4)),
+		pa.field("person_name", pa.string()),
+		pa.field("face_embedding", pa.list_(pa.float32(), 512)),
+		pa.field("created_at", pa.string())
+	])
+	return db.create_table(
+		FACE_TABLE_NAME,
+		schema=schema
+	)
+
 
 #Processed file hash table
 def get_hash_table():
@@ -78,6 +97,7 @@ def get_hash_table():
 table=get_table()
 hash_table=get_hash_table()
 image_table = get_image_table()
+face_table = get_face_table()
 
 
 
@@ -127,6 +147,22 @@ def store_image_chunk(chunk_id, path, file_type, text, image_embedding):
 
 	print(f"Stored Image Chunks: {chunk_id}")
 
+#Store face record
+def store_face_record(face_id, image_path, bbox, face_embedding, person_name="unknown"):
+	#Store one detected face and its 512-D face embedding vector in the face_embeddings table.
+	ftable = get_face_table()
+	ftable.add([
+		{
+			"face_id": face_id,
+			"image_path": image_path,
+			"bbox": bbox,
+			"person_name": person_name,
+			"face_embedding": face_embedding,
+			"created_at": str(datetime.now())
+		}
+	])
+	print(f"Stored Face Record: {face_id} ({person_name})")
+
 #Show all records
 def show_all():
 	return table.to_pandas()
@@ -140,6 +176,10 @@ def total_chunks():
 
 def total_files():
 	return hash_table.count_rows()
+
+def total_faces():
+	ftable = get_face_table()
+	return ftable.count_rows()
 
 if __name__=="__main__":
 	print("Document schema: ")
