@@ -1,4 +1,5 @@
 import os
+import re
 from app.search.vector_search import search
 from app.llm.ollama_client import ask_llama
 from app.llm.gemini_client import ask_gemini
@@ -8,6 +9,7 @@ from app.llm.summary_client import summarize_text
 from app.search.summary_search import search_for_summary, search_for_book_summary
 from app.rag.image_summarizer import summarize_image
 from app.search.object_search import search_images_by_object
+from app.search.face_search import is_face_search_query, search_images_by_face
 
 def is_image_list_query(question):
 	question_lower = question.lower()
@@ -28,48 +30,90 @@ def is_image_list_query(question):
 
 
 def is_object_search_query(question):
-    question_lower = question.lower().strip()
+	question_lower = question.lower().strip()
 
-    phrases = [
-        # Existing patterns
-        "find images containing",
-        "find images with",
-        "show images containing",
-        "show images with",
-        "images containing",
-        "images with",
-        "which images contain",
-        "which images have",
-        "find a picture of",
-        "find pictures of",
-        "find photos of",
-        "show me images containing",
-        "show me images with",
-        # Visual condition, multi-object & relationship patterns
-        "image in which",
-        "images in which",
-        "image where",
-        "images where",
-        "image showing",
-        "images showing",
-        "list the name of image",
-        "list the names of images",
-        "which image has",
-        "which images have",
-        "which image contains",
-        "which images contain",
-        "which image shows",
-        "which images show",
-        "find images where",
-        "find image where",
-        "find image containing",
-        "find image with",
-        "find a photo of",
-        "show image containing",
-        "show image with"
-    ]
+	phrases = [
+		# Existing patterns
+		"find images containing",
+		"find images with",
+		"show images containing",
+		"show images with",
+		"images containing",
+		"images with",
+		"which images contain",
+		"which images have",
+		"find a picture of",
+		"find pictures of",
+		"find photos of",
+		"show me images containing",
+		"show me images with",
+		# Visual condition, multi-object & relationship patterns
+		"image in which",
+		"images in which",
+		"picture in which",
+		"pictures in which",
+		"photo in which",
+		"photos in which",
+		"in which image",
+		"in which images",
+		"in which picture",
+		"in which pictures",
+		"in which photo",
+		"in which photos",
+		"in what image",
+		"in what images",
+		"image where",
+		"images where",
+		"picture where",
+		"pictures where",
+		"image showing",
+		"images showing",
+		"picture showing",
+		"pictures showing",
+		"list the name of image",
+		"list the name of the image",
+		"list the names of images",
+		"list the names of the images",
+		"which image has",
+		"which images have",
+		"which picture has",
+		"which pictures have",
+		"which image contains",
+		"which images contain",
+		"which picture contains",
+		"which pictures contain",
+		"which image shows",
+		"which images show",
+		"which picture shows",
+		"which pictures show",
+		"find images where",
+		"find image where",
+		"find pictures where",
+		"find picture where",
+		"find image containing",
+		"find pictures containing",
+		"find picture containing",
+		"find image with",
+		"find pictures with",
+		"find picture with",
+		"find a photo of",
+		"show image containing",
+		"show image with"
+	]
 
-    return any(phrase in question_lower for phrase in phrases)
+	if any(phrase in question_lower for phrase in phrases):
+		return True
+
+	# Flexible regex pattern treating image/picture/photo and verbs/indicators as equivalent
+	pattern_verb = r"\b(find|show|list|which|in\s+which|in\s+what)\b.*\b(image|images|picture|pictures|photo|photos)\b.*\b(contains?|have|has|shows?|where|in\s+which|that\s+has|that\s+have|that\s+contains?|showing|with|containing)\b"
+	if re.search(pattern_verb, question_lower):
+		return True
+
+	pattern_noun_first = r"\b(image|images|picture|pictures|photo|photos)\b.*\b(contains?|have|has|shows?|where|in\s+which|that\s+has|that\s+have|that\s+contains?|showing|with|containing)\b"
+	if re.search(pattern_noun_first, question_lower):
+		return True
+
+	return False
 
 
 def ask(question):
@@ -99,6 +143,33 @@ def ask(question):
 			if fn.lower() in question_lower:
 				return f"Yes, '{fn}' is indexed in your Personal Second Brain.", [fn], 1
 
+	# Step 1.4: Check for face-memory / person search
+	if is_face_search_query(question):
+		results = search_images_by_face(question)
+
+		if not results:
+			return (
+				"No indexed image was found matching the requested face / person.",
+				[],
+				0
+			)
+
+		sources = sorted(
+			list(
+				set(
+					os.path.basename(r["image_path"])
+					for r in results
+				)
+			)
+		)
+
+		answer = "Images matching the requested face / person:\n"
+
+		for i, source in enumerate(sources, 1):
+			answer += f"{i}. {source}\n"
+
+		return answer, sources, len(results)
+
 	if is_image_list_query(question):
 		image_table = get_image_table()
 
@@ -123,13 +194,13 @@ def ask(question):
 
 		return answer, image_names, len(image_names)
 
-	    # Step 1.6: Check for object-based image search
+	# Step 1.6: Check for object-based image search
 	if is_object_search_query(question):
 		results = search_images_by_object(question)
 
 		if not results:
 			return (
-                "No indexed image was found containing the requested object.",
+                "No indexed image was found matching the requested condition.",
                 [],
                 0
             )
@@ -143,12 +214,28 @@ def ask(question):
             )
         )
 
-		answer = "Images containing the requested object:\n"
+		answer = "Images matching the requested condition:\n"
 
 		for i, source in enumerate(sources, 1):
 			answer += f"{i}. {source}\n"
 
-		return answer, sources, len(results)	
+		return answer, sources, len(results)
+
+	# Step 1.8: Check if query explicitly mentions an indexed image file
+	image_table = get_image_table()
+	if image_table is not None:
+		image_df = image_table.to_pandas()
+		if not image_df.empty:
+			for idx, row in image_df.iterrows():
+				img_path = row["path"]
+				img_basename = os.path.basename(img_path)
+				img_stem = os.path.splitext(img_basename)[0]
+				if (len(img_stem) >= 3 and img_stem.lower() in question_lower) or img_basename.lower() in question_lower:
+					try:
+						answer = summarize_image(img_path, question)
+					except Exception as e:
+						answer = f"Image VLM Error: {str(e)}"
+					return answer, [img_basename], 1
 
 	# Step 2: Perform vector search
 	analysis = analyze_query(question)
