@@ -3,52 +3,105 @@ from app.storage.lancedb_store import get_image_table
 from app.rag.image_summarizer import summarize_image
 
 
-def extract_object_from_question(question):
+def extract_visual_condition_from_question(question):
     """
-    Extract the object that the user wants to search for.
+    Extract the visual condition or object description from a question.
 
     Examples:
-        "Find images containing a car" -> "car"
-        "Find images with a laptop" -> "laptop"
-        "Which images contain a dog?" -> "dog"
+        "Find images containing a person" -> "a person"
+        "Which image contains dogs and cats?" -> "dogs and cats"
+        "List the name of image in which dogs and cats are playing together" -> "dogs and cats are playing together"
+        "Which image shows a person riding a bicycle?" -> "a person riding a bicycle"
     """
 
     question_lower = question.lower().strip()
 
     patterns = [
+        "list the names of images in which ",
+        "list the name of image in which ",
+        "list the names of images where ",
+        "list the name of image where ",
+        "list the names of images with ",
+        "list the name of image with ",
+        "list the images in which ",
+        "list the image in which ",
+        "list the images showing ",
+        "list the image showing ",
+        "list images in which ",
+        "list image in which ",
+        "list images showing ",
+        "list image showing ",
+        "list images where ",
+        "list image where ",
+        "list images with ",
+        "list image with ",
+        "show me images containing ",
+        "show me images with ",
+        "show me image containing ",
+        "show me image with ",
         "find images containing ",
+        "find image containing ",
+        "find images showing ",
+        "find image showing ",
         "find images with ",
+        "find image with ",
+        "find images where ",
+        "find image where ",
         "show images containing ",
+        "show image containing ",
+        "show images showing ",
+        "show image showing ",
         "show images with ",
-        "images containing ",
-        "images with ",
+        "show image with ",
+        "show images where ",
+        "show image where ",
         "which images contain ",
+        "which image contains ",
         "which images have ",
+        "which image has ",
+        "which images show ",
+        "which image shows ",
         "find a picture of ",
         "find pictures of ",
         "find photos of ",
-        "show me images containing ",
-        "show me images with ",
+        "find a photo of ",
+        "images containing ",
+        "image containing ",
+        "images showing ",
+        "image showing ",
+        "images in which ",
+        "image in which ",
+        "images where ",
+        "image where ",
+        "images with ",
+        "image with ",
+        "picture of ",
+        "pictures of ",
+        "photo of ",
+        "photos of "
     ]
 
     for pattern in patterns:
         if pattern in question_lower:
-            object_name = question_lower.split(pattern, 1)[1]
+            condition = question_lower.split(pattern, 1)[1]
+            return condition.strip(" ?.!,")
 
-            # Remove common punctuation
-            object_name = object_name.strip(" ?.!,")
+    return question_lower.strip(" ?.!,")
 
-            return object_name
 
-    return None
+def extract_object_from_question(question):
+    """
+    Backward-compatible wrapper for extract_visual_condition_from_question.
+    """
+    return extract_visual_condition_from_question(question)
 
 
 def search_images_by_object(question, max_results=10):
     """
-    Search indexed images for a requested object.
+    Search indexed images for a requested object or visual condition.
 
     The current implementation uses Qwen2.5-VL
-    to inspect each indexed image.
+    to inspect each candidate indexed image.
     """
 
     image_table = get_image_table()
@@ -63,14 +116,14 @@ def search_images_by_object(question, max_results=10):
         print("No indexed images found.")
         return []
 
-    object_name = extract_object_from_question(question)
+    visual_condition = extract_visual_condition_from_question(question)
 
-    if not object_name:
-        print("Could not extract object from question.")
+    if not visual_condition:
+        print("Could not extract visual condition from question.")
         return []
 
-    print("\n===== OBJECT SEARCH =====")
-    print("Requested object:", object_name)
+    print("\n===== OBJECT / VISUAL CONDITION SEARCH =====")
+    print("Requested condition:", visual_condition)
 
     results = []
 
@@ -89,9 +142,9 @@ def search_images_by_object(question, max_results=10):
             prompt = f"""
 Look at this image carefully.
 
-Determine whether the image contains this object:
+Determine whether the image satisfies the following visual condition:
 
-"{object_name}"
+"{visual_condition}"
 
 Answer ONLY with:
 YES
@@ -102,7 +155,6 @@ Do not explain your answer.
 """
 
             # We use the existing Qwen2.5-VL function.
-            # The function must support a custom question/prompt.
             answer = summarize_image(
                 image_path,
                 prompt
@@ -116,7 +168,8 @@ Do not explain your answer.
                 answer_clean
             )
 
-            if answer_clean.startswith("YES"):
+            words = [w.strip(".,!?:;") for w in answer_clean.split()]
+            if answer_clean.startswith("YES") or "YES" in words:
                 # Get the corresponding image record
                 image_rows = image_df[
                     image_df["path"] == image_path
@@ -131,16 +184,14 @@ Do not explain your answer.
 
         except Exception as e:
             print(
-                "Object detection failed for",
+                "Visual condition detection failed for",
                 os.path.basename(image_path),
                 ":",
                 str(e)
             )
 
     print(
-        "Images containing",
-        object_name,
-        ":",
+        "Images matching condition ('" + visual_condition + "'):",
         len(results)
     )
 
