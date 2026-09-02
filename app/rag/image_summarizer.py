@@ -52,8 +52,22 @@ def summarize_image(image_path, question=None):
 
     try:
         if question and question.strip():
+            is_summary_req = any(w in question.lower() for w in ["summarize", "summary", "describe", "overview"])
+            if is_summary_req:
+                prompt = f"""You are a Vision Language Assistant.
 
-            prompt = f"""You are a Vision Language Assistant.
+Analyze the provided image carefully and provide a clear, concise summary of the visual content according to the request.
+
+User Request:
+{question.strip()}
+
+Rules:
+- Provide a helpful, clear summary of what is visible in the image.
+- Do not invent information.
+
+Summary:"""
+            else:
+                prompt = f"""You are a Vision Language Assistant.
 
 Analyze the provided image carefully and answer the following question based ONLY
 on what is actually visible in the image.
