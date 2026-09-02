@@ -231,7 +231,7 @@ Answer ONLY YES or NO."""
 
             print(
                 os.path.basename(image_path),
-                "->",
+                ": ",
                 answer_clean
             )
 
