@@ -11,3 +11,8 @@ TARGET_SAMPLE_RATE=16000
 TARGET_CHANNELS=1
 TARGET_SAMPLE_FORMAT='pcm_s16le'
 
+def check_ffmpeg():
+	"Verify that ffmpeg is installed and available in PATH"
+	if shutil.which('ffmpeg') is None:
+		raise RuntimeError("ffmpeg is not installed or not available in PATH.")
+		
