@@ -23,3 +23,5 @@ watched_folder/
 
 *.lance/
 dump.rdb
+database_backup*/
+
