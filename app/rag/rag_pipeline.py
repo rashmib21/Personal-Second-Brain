@@ -9,7 +9,7 @@ from app.llm.summary_client import summarize_text
 from app.search.summary_search import search_for_summary, search_for_book_summary
 from app.rag.image_summarizer import summarize_image
 from app.search.object_search import search_images_by_object
-from app.search.face_search import is_face_search_query, search_images_by_face
+from app.search.face_search import is_face_search_query, search_images_by_face, extract_person_name_from_question
 
 def is_image_list_query(question):
 	question_lower = question.lower()
@@ -116,10 +116,11 @@ def is_object_search_query(question):
 	return False
 
 
-def ask(question):
+def ask(question, return_structured=False):
 	"""
-	Main RAG function: searches vector database and generates an answer using Ollama.
-	Returns: (answer_string, list_of_sources, num_relevant_chunks)
+	Main RAG function: searches vector database and generates an answer.
+	Returns: (answer_string, list_of_sources, num_relevant_chunks) by default,
+	or structured dict when return_structured=True.
 	"""
 	question_lower = question.lower()
 
@@ -141,85 +142,157 @@ def ask(question):
 
 		for fn in file_names:
 			if fn.lower() in question_lower:
-				return f"Yes, '{fn}' is indexed in your Personal Second Brain.", [fn], 1
+				ans = f"Yes, '{fn}' is indexed in your Personal Second Brain."
+				if return_structured:
+					return {"answer": ans, "sources": [fn], "num_chunks": 1, "type": "text", "images": []}
+				return ans, [fn], 1
 
 	# Step 1.4: Check for face-memory / person search
 	if is_face_search_query(question):
 		results = search_images_by_face(question)
 
 		if not results:
-			return (
-				"No indexed image was found matching the requested face / person.",
-				[],
-				0
-			)
+			person_name = extract_person_name_from_question(question)
+			if person_name:
+				msg = f"No face memory record or matching image found for '{person_name.capitalize()}'. {person_name.capitalize()}'s face has not yet been registered in your Personal Second Brain."
+			else:
+				msg = "No indexed image was found matching the requested face / person."
 
-		sources = sorted(
+			if return_structured:
+				return {"answer": msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+			return msg, [], 0
+
+		image_paths = sorted(
 			list(
 				set(
-					os.path.basename(r["image_path"])
+					r.get("image_path") or r.get("path")
 					for r in results
+					if (r.get("image_path") or r.get("path"))
 				)
 			)
 		)
 
-		answer = "Images matching the requested face / person:\n"
+		sources = [os.path.basename(p) for p in image_paths]
+		structured_images = [
+			{
+				"type": "image",
+				"path": p,
+				"source": os.path.basename(p)
+			}
+			for p in image_paths
+		]
 
-		for i, source in enumerate(sources, 1):
-			answer += f"{i}. {source}\n"
+		answer_parts = ["Images matching the requested face / person:"]
+		for p in image_paths:
+			src = os.path.basename(p)
+			answer_parts.append(f"\n![{src}](file://{p})\nSource: {src}\nPath: {p}")
 
-		return answer, sources, len(results)
+		answer_str = "\n".join(answer_parts)
+
+		if return_structured:
+			return {
+				"answer": answer_str,
+				"sources": sources,
+				"num_chunks": len(results),
+				"type": "image",
+				"images": structured_images
+			}
+
+		return answer_str, sources, len(results)
 
 	if is_image_list_query(question):
 		image_table = get_image_table()
 
 		if image_table is None:
-			return "No images are indexed.", [], 0
+			msg = "No images are indexed."
+			if return_structured:
+				return {"answer": msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+			return msg, [], 0
 
 		image_df = image_table.to_pandas()
 
 		if image_df.empty:
-			return "No images are indexed.", [], 0
+			msg = "No images are indexed."
+			if return_structured:
+				return {"answer": msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+			return msg, [], 0
 
-		image_paths = image_df["path"].tolist()
+		image_paths = sorted(list(set(image_df["path"].dropna().tolist())))
+		sources = [os.path.basename(p) for p in image_paths]
+		structured_images = [
+			{
+				"type": "image",
+				"path": p,
+				"source": os.path.basename(p)
+			}
+			for p in image_paths
+		]
 
-		image_names = sorted(
-		    list(set(os.path.basename(path) for path in image_paths))
-		)
+		answer_parts = ["Images in your Personal Second Brain:"]
+		for p in image_paths:
+			src = os.path.basename(p)
+			answer_parts.append(f"\n![{src}](file://{p})\nSource: {src}\nPath: {p}")
 
-		answer = "Images in your Personal Second Brain:\n"
+		answer_str = "\n".join(answer_parts)
 
-		for i, name in enumerate(image_names, 1):
-			answer += f"{i}. {name}\n"
+		if return_structured:
+			return {
+				"answer": answer_str,
+				"sources": sources,
+				"num_chunks": len(sources),
+				"type": "image",
+				"images": structured_images
+			}
 
-		return answer, image_names, len(image_names)
+		return answer_str, sources, len(sources)
 
 	# Step 1.6: Check for object-based image search
 	if is_object_search_query(question):
 		results = search_images_by_object(question)
 
 		if not results:
-			return (
-                "No indexed image was found matching the requested condition.",
-                [],
-                0
-            )
+			msg = "No indexed image was found matching the requested condition."
+			if return_structured:
+				return {"answer": msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+			return msg, [], 0
 
-		sources = sorted(
-            list(
-                set(
-                    os.path.basename(result["path"])
-                    for result in results
-                )
-            )
-        )
+		image_paths = sorted(
+			list(
+				set(
+					result.get("path") or result.get("image_path")
+					for result in results
+					if (result.get("path") or result.get("image_path"))
+				)
+			)
+		)
 
-		answer = "Images matching the requested condition:\n"
+		sources = [os.path.basename(p) for p in image_paths]
+		structured_images = [
+			{
+				"type": "image",
+				"path": p,
+				"source": os.path.basename(p)
+			}
+			for p in image_paths
+		]
 
-		for i, source in enumerate(sources, 1):
-			answer += f"{i}. {source}\n"
+		answer_parts = ["Images matching the requested condition:"]
+		for p in image_paths:
+			src = os.path.basename(p)
+			answer_parts.append(f"\n![{src}](file://{p})\nSource: {src}\nPath: {p}")
 
-		return answer, sources, len(results)
+		answer_str = "\n".join(answer_parts)
+
+		if return_structured:
+			return {
+				"answer": answer_str,
+				"sources": sources,
+				"num_chunks": len(results),
+				"type": "image",
+				"images": structured_images
+			}
+
+		return answer_str, sources, len(results)
 
 	# Step 1.8: Check if query explicitly mentions an indexed image file
 	image_table = get_image_table()
@@ -232,10 +305,20 @@ def ask(question):
 				img_stem = os.path.splitext(img_basename)[0]
 				if (len(img_stem) >= 3 and img_stem.lower() in question_lower) or img_basename.lower() in question_lower:
 					try:
-						answer = summarize_image(img_path, question)
+						vlm_summary = summarize_image(img_path, question)
 					except Exception as e:
-						answer = f"Image VLM Error: {str(e)}"
-					return answer, [img_basename], 1
+						vlm_summary = f"Image VLM Error: {str(e)}"
+					src_name = img_basename
+					answer_str = f"![{src_name}](file://{img_path})\n\nSource: {src_name}\nPath: {img_path}\n\n{vlm_summary}"
+					if return_structured:
+						return {
+							"answer": answer_str,
+							"sources": [src_name],
+							"num_chunks": 1,
+							"type": "image",
+							"images": [{"type": "image", "path": img_path, "source": src_name}]
+						}
+					return answer_str, [src_name], 1
 
 	# Step 2: Perform vector search
 	analysis = analyze_query(question)
@@ -248,23 +331,38 @@ def ask(question):
 		else:
 			results = search_for_book_summary(question)
 	else:
-	    results = search(question)
+		results = search(question)
 
 	# Retrieval decision determined by Python BEFORE calling Ollama
 	if not results:
-		return "Not found in the retrieved source.", [], 0
+		msg = "Not found in the retrieved source."
+		if return_structured:
+			return {"answer": msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+		return msg, [], 0
+
 	# Handle image results using Qwen2.5-VL
 	if results and results[0].get("file_type") == "image":
-	    image_path = results[0]["path"]
+		image_path = results[0]["path"]
 
-	    try:
-	        answer = summarize_image(image_path, question)
-	    except Exception as e:
-	        answer = f"Image VLM Error: {str(e)}"
+		try:
+			vlm_summary = summarize_image(image_path, question)
+		except Exception as e:
+			vlm_summary = f"Image VLM Error: {str(e)}"
 
-	    sources = [os.path.basename(image_path)]
+		sources = [os.path.basename(image_path)]
+		src_name = sources[0]
+		answer_str = f"![{src_name}](file://{image_path})\n\nSource: {src_name}\nPath: {image_path}\n\n{vlm_summary}"
 
-	    return answer, sources, len(results)
+		if return_structured:
+			return {
+				"answer": answer_str,
+				"sources": sources,
+				"num_chunks": len(results),
+				"type": "image",
+				"images": [{"type": "image", "path": image_path, "source": src_name}]
+			}
+
+		return answer_str, sources, len(results)
 
 	num_chunks = len(results)
 
@@ -324,6 +422,27 @@ Answer:"""
 			answer = ask_gemini(prompt)
 		except Exception as e:
 			answer = f"LLM Error: {str(e)}"
+
+	if return_structured:
+		extracted_chunks = []
+		for item in results[:3]:
+			if isinstance(item, (tuple, list)) and len(item) > 0:
+				doc = item[0]
+			else:
+				doc = item
+			if isinstance(doc, dict):
+				extracted_chunks.append(doc.get("text", ""))
+			else:
+				extracted_chunks.append(str(doc))
+
+		return {
+			"answer": answer,
+			"sources": sources,
+			"num_chunks": num_chunks,
+			"type": "text",
+			"chunks": extracted_chunks,
+			"images": []
+		}
 
 	return answer, sources, num_chunks
 
