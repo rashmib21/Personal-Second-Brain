@@ -268,10 +268,10 @@ def search(question, max_results=10):
 				if not p_scores or p_scores[0][1] < -3.0:
 					reranked = []
 
-		if top_text_score < -3.5:
+		if top_text_score < -4.3:
 			if not is_image_query:
 				reranked = [pair for pair in reranked if pair[0].get("file_type") == "image"]
-				if reranked and reranked[0][1] < -3.5:
+				if reranked and reranked[0][1] < -4.3:
 					reranked = []
 
 	if reranked:
@@ -283,7 +283,7 @@ def search(question, max_results=10):
 		elif is_image_query:
 			cutoff_score = top_score - 1.2
 		else:
-			cutoff_score = max(-8.0, top_score - 4.5)
+			cutoff_score = max(-8.0, top_score - 3.8)
 		previous_score = None		
 
 		for doc, score in reranked:
