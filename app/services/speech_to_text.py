@@ -1,7 +1,10 @@
+import os
+import subprocess
+import tempfile
 import torch
 from qwen_asr import Qwen3ASRModel
 
-model_name="moorlee/qwen3-asr-0.6b-hinglish"
+model_name = "moorlee/qwen3-asr-0.6b-hinglish"
 
 model = None
 
@@ -11,8 +14,9 @@ def get_asr_model():
 		print("Loading Srota ASR model...")
 		model = Qwen3ASRModel.from_pretrained(
 			model_name,
-			dtype=torch.float16,
-			device_map="cuda:0"
+			dtype=torch.bfloat16,
+			device_map="cuda:0",
+			max_inference_batch_size=1
 		)
 		print("Srota ASR model loaded.")
 	return model
@@ -22,7 +26,64 @@ def transcribe_audio(audio_path):
 
     try:
         asr_model = get_asr_model()
-        result = asr_model.transcribe(audio_path)
+
+        # Check audio duration using ffprobe if available
+        duration = None
+        if os.path.exists(audio_path):
+            try:
+                ffprobe_cmd = [
+                    'ffprobe', '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    audio_path
+                ]
+                res_dur = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
+                duration = float(res_dur.stdout.strip())
+            except Exception:
+                duration = None
+
+        # For long audio (> 60s), split into 60s segments to prevent GPU VRAM OOM on low-VRAM setup
+        if duration and duration > 60.0:
+            segment_length = 60.0
+            full_text_parts = []
+            detected_lang = "unknown"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                start_sec = 0.0
+                seg_idx = 0
+                while start_sec < duration:
+                    seg_file = os.path.join(tmpdir, f"seg_{seg_idx}.wav")
+                    ffmpeg_cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(start_sec),
+                        "-t", str(segment_length),
+                        "-i", audio_path,
+                        "-ar", "16000",
+                        "-ac", "1",
+                        "-c:a", "pcm_s16le",
+                        seg_file
+                    ]
+                    subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
+                    res = asr_model.transcribe(audio=seg_file)
+                    if res:
+                        t_obj = res[0]
+                        if t_obj.text:
+                            full_text_parts.append(t_obj.text.strip())
+                        if t_obj.language and detected_lang == "unknown":
+                            detected_lang = t_obj.language
+                    start_sec += segment_length
+                    seg_idx += 1
+                    torch.cuda.empty_cache()
+
+            full_text = "\n".join(full_text_parts)
+            return {
+                "text": full_text,
+                "language": detected_lang,
+                "words": []
+            }
+
+        # For short audio (<= 60s), transcribe directly
+        result = asr_model.transcribe(audio=audio_path)
 
         if not result:
             return {
