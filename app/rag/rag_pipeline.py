@@ -227,8 +227,8 @@ def ask(question, return_structured=False):
     # ROUTE BRANCH 1: Source-Based Image Retrieval
     # Triggers when source_exists is True, modality is image, and query asks to retrieve/show the image source
     if is_image_source_resolved and not is_person_verification_query and not is_visual_qa:
-        # print("\n===== IMAGE ROUTING =====")
-        # print("Route: source_image_retrieval")
+        print("\n===== IMAGE ROUTING =====")
+        print("Route: source_image_retrieval")
 
         src_name = os.path.basename(resolved_source_path)
         ans_str = f"Retrieved image source '{src_name}'."
@@ -258,11 +258,11 @@ def ask(question, return_structured=False):
 
     # ROUTE BRANCH 2: Face Verification inside Specific Image Source
     elif is_image_source_resolved and is_person_verification_query:
-        # print("\n===== IMAGE ROUTING =====")
-        # print("Route: face_verification")
+        print("\n===== IMAGE ROUTING =====")
+        print("Route: face_verification")
 
-        # print("\n===== FACE ANALYSIS =====")
-        # print(f"Face intent: {face_intent if face_intent != 'none' else 'face_verification'}")
+        print("\n===== FACE ANALYSIS =====")
+        print(f"Face intent: {face_intent if face_intent != 'none' else 'face_verification'}")
 
         target_img = resolved_source_path
         face_res = analyze_faces_in_image(target_img)
@@ -334,8 +334,8 @@ def ask(question, return_structured=False):
 
     # ROUTE BRANCH 3: Persistent Face-Memory Search (Without a specific existing source file)
     elif (face_intent == "face_search" or is_face_search_query(question)) and not is_image_source_resolved:
-        # print("\n===== IMAGE ROUTING =====")
-        # print("Route: face_memory_search")
+        print("\n===== IMAGE ROUTING =====")
+        print("Route: face_memory_search")
 
         # print("\n===== FACE ANALYSIS =====")
         # print("Face intent: face_search")

@@ -25,10 +25,11 @@ def get_indexed_filenames():
     return filenames
 
 
-def find_best_matching_source(question_lower, indexed_files):
+def find_best_matching_source(question_lower, indexed_files, query_modality="all", face_intent="none"):
     """
     Helper function to find the best matching indexed filename for a user query.
-    Enforces robust entity matching while ignoring generic category terms like 'audio' or 'video'.
+    Enforces robust entity matching while ignoring generic category terms like 'audio', 'video', 'resume'.
+    Restricts candidate files based on query_modality and face_intent.
     """
     if not indexed_files:
         return None
@@ -36,24 +37,35 @@ def find_best_matching_source(question_lower, indexed_files):
     # Step 1: Define generic category terms and filler words to ignore during stem matching
     generic_media_terms = {
         "audio", "video", "image", "picture", "photo", "recording",
-        "sound", "file", "document", "pdf", "docx", "xlsx", "mp3",
-        "m4a", "wav", "mpeg", "txt", "excel", "spreadsheet"
+        "sound", "file", "document", "documents", "pdf", "docx", "xlsx", "mp3",
+        "m4a", "wav", "mpeg", "txt", "excel", "spreadsheet", "resume", "cv",
+        "note", "notes", "paper", "paperwork"
     }
 
     stop_words = {
         "the", "a", "an", "of", "in", "from", "to", "and", "or", "is", "for",
         "with", "on", "at", "by", "this", "that", "my", "please", "what", "who",
         "summarize", "summarise", "summary", "chapter", "section", "part", "file",
-        "show", "get", "give", "said", "discussed", "listen", "recording", "content"
+        "show", "get", "give", "said", "discussed", "listen", "recording", "content", "me", "can", "you"
     }
 
-    # Step 2: Check for exact full filename in query (e.g. "Accounts.m4a", "audio.mpeg")
-    for filename in indexed_files:
+    # Step 2: Filter candidate files by modality if appropriate
+    candidate_files = indexed_files
+    image_exts = (".jpg", ".jpeg", ".png", ".webp")
+    audio_exts = (".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac")
+
+    if query_modality == "image" or face_intent in ["face_search", "face_identification"]:
+        candidate_files = [f for f in indexed_files if f.lower().endswith(image_exts)]
+    elif query_modality == "audio":
+        candidate_files = [f for f in indexed_files if f.lower().endswith(audio_exts)]
+
+    # Step 3: Check for exact full filename in query (e.g. "Accounts.m4a", "audio.mpeg")
+    for filename in candidate_files:
         filename_lower = filename.lower()
         if filename_lower in question_lower:
             return filename
 
-    # Step 3: Extract meaningful non-generic query tokens
+    # Step 4: Extract meaningful non-generic query tokens
     query_tokens = re.findall(r"\b[a-zA-Z0-9_]+\b", question_lower)
     meaningful_tokens = []
     for token in query_tokens:
@@ -61,11 +73,11 @@ def find_best_matching_source(question_lower, indexed_files):
         if len(token_lower) >= 3 and token_lower not in stop_words and token_lower not in generic_media_terms:
             meaningful_tokens.append(token_lower)
 
-    # Step 4: Match meaningful query tokens against indexed filenames
+    # Step 5: Match meaningful query tokens against candidate filenames
     best_match = None
     best_score = 0
 
-    for filename in indexed_files:
+    for filename in candidate_files:
         filename_lower = filename.lower()
         filename_stem = os.path.splitext(filename_lower)[0]
 
@@ -83,8 +95,8 @@ def find_best_matching_source(question_lower, indexed_files):
     if best_match is not None and best_score > 0:
         return best_match
 
-    # Step 5: Check exact stem matches for non-generic stems
-    for filename in indexed_files:
+    # Step 6: Check exact stem matches for non-generic stems
+    for filename in candidate_files:
         filename_lower = filename.lower()
         filename_stem = os.path.splitext(filename_lower)[0]
 
