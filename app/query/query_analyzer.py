@@ -43,10 +43,12 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
     }
 
     stop_words = {
-        "the", "a", "an", "of", "in", "from", "to", "and", "or", "is", "for",
-        "with", "on", "at", "by", "this", "that", "my", "please", "what", "who",
-        "summarize", "summarise", "summary", "chapter", "section", "part", "file",
-        "show", "get", "give", "said", "discussed", "listen", "recording", "content", "me", "can", "you"
+        "the", "a", "an", "of", "in", "from", "to", "and", "or", "is", "are", "was", "were",
+        "be", "been", "being", "have", "has", "had", "do", "does", "did", "for", "with",
+        "on", "at", "by", "this", "that", "my", "please", "what", "who", "how", "which",
+        "where", "when", "summarize", "summarise", "summary", "chapter", "section", "part",
+        "file", "show", "get", "give", "said", "discussed", "listen", "recording", "content",
+        "me", "can", "you", "listed", "mention", "mentioned"
     }
 
     # Step 2: Filter candidate files by modality if appropriate
@@ -73,19 +75,19 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
         if len(token_lower) >= 3 and token_lower not in stop_words and token_lower not in generic_media_terms:
             meaningful_tokens.append(token_lower)
 
-    # Step 5: Match meaningful query tokens against candidate filenames
+    # Step 5: Match meaningful query tokens against candidate filename tokens
     best_match = None
     best_score = 0
 
     for filename in candidate_files:
         filename_lower = filename.lower()
         filename_stem = os.path.splitext(filename_lower)[0]
+        filename_words = set(re.split(r"[\s_\-\.]+", filename_lower))
+        stem_words = set(re.split(r"[\s_\-\.]+", filename_stem))
 
         score = 0
         for token in meaningful_tokens:
-            if token in filename_lower:
-                score = score + 10
-            elif token in filename_stem:
+            if token in filename_words or token in stem_words:
                 score = score + 10
 
         if score > best_score:
