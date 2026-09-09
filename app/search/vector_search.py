@@ -116,225 +116,251 @@ def is_image_question(question):
 
 	return any(word in question_lower for word in image_words)
 
-def search(question, max_results=10):
 
-	# Check whether this is an image-related question
-	if is_image_question(question):
-		print("\n===== IMAGE QUERY DETECTED =====")
+def search(question, max_results=10, analysis=None, preferred_sources=None, rejected_sources=None):
+	"""
+	Source-aware & modality-aware hybrid retrieval with RRF and CrossEncoder reranking.
+	Enforces explicit source filter BEFORE semantic search / reranking.
+	Unifies candidate lookup across documents and image_documents tables.
+	"""
+	from app.query.query_analyzer import analyze_query
 
-		image_results = search_images_by_text(question)
+	# Step 1: Analyze query if analysis object is not passed
+	if analysis is None:
+		analysis = analyze_query(question)
 
-		if not image_results:
-			print("No relevant image found.")
-			return []
+	query_modality = analysis.get("modality", "all")
+	source_hint = analysis.get("source_hint")
 
-		print("\n===== IMAGE RESULTS =====")
+	preferred_set = set()
+	if preferred_sources:
+		for src in preferred_sources:
+			preferred_set.add(src.lower())
 
-		for result in image_results:
-			print("Source:", os.path.basename(result["path"]))
+	if source_hint:
+		preferred_set.add(source_hint.lower())
 
-		return image_results
+	rejected_set = set()
+	if rejected_sources:
+		for src in rejected_sources:
+			rejected_set.add(src.lower())
 
-	table=get_table()
-	if table is None:
-		print("LanceDB table is not available")
+	# Step 2: Fetch all indexed chunks from LanceDB (documents and image_documents tables)
+	doc_table = get_table()
+	image_table = get_image_table()
+
+	all_indexed_rows = []
+
+	if doc_table is not None and doc_table.count_rows() > 0:
+		df_doc = doc_table.to_pandas()
+		for i in range(len(df_doc)):
+			r = df_doc.iloc[i]
+			all_indexed_rows.append({
+				"chunk_id": str(r.get("chunk_id", f"doc_{i}")),
+				"path": str(r.get("path", "")),
+				"file_type": str(r.get("file_type", "document")),
+				"text": str(r.get("text", ""))
+			})
+
+	if image_table is not None and image_table.count_rows() > 0:
+		df_img = image_table.to_pandas()
+		for i in range(len(df_img)):
+			r = df_img.iloc[i]
+			all_indexed_rows.append({
+				"chunk_id": str(r.get("chunk_id", f"img_{i}")),
+				"path": str(r.get("path", "")),
+				"file_type": "image",
+				"text": str(r.get("text", ""))
+			})
+
+	if len(all_indexed_rows) == 0:
+		print("No indexed data found in database.")
 		return []
 
-	#step 1: turn the question into a vector for dense search
-	question_vector=generate_embedding("text",question)
-
-	#step 2: get all chunks as a normal table, remove noise chunks
-	all_chunks=table.to_pandas()
-	if all_chunks.empty:
-		return []
-
-	clean_rows=[]
-	for i in range(len(all_chunks)):
-		row=all_chunks.iloc[i]
+	# Filter out noise chunks and rejected sources
+	clean_rows = []
+	for row in all_indexed_rows:
+		r_base = os.path.basename(row["path"]).lower()
+		if rejected_set and r_base in rejected_set and r_base not in preferred_set:
+			continue
 		if not is_noise_chunk(row["text"]):
 			clean_rows.append(row)
-	if len(clean_rows)==0:
+
+	# Step 3: Enforce Hard Pre-Retrieval Source Filter BEFORE Search/Reranking
+	canonical_source_id = analysis.get("canonical_source_id")
+	resolved_source = source_hint
+	source_exists = False
+
+	if source_hint == "UNRESOLVED_AUDIO_SOURCE":
+		print("HARD SOURCE ROUTING: Source is UNRESOLVED_AUDIO_SOURCE. Returning 0 candidate chunks.")
 		return []
 
-	#step 3: dense (vector) search gives us a ranking based on meaning
-	dense_results=table.search(question_vector).metric("cosine").limit(300).to_list()
+	candidate_rows = []
 
-	dense_rank={} #chunk_id: rank number 1=best
-	rank_number=1
-	for doc in dense_results:
-		dense_rank[doc["chunk_id"]]=rank_number
-		rank_number+=1
+	if source_hint or canonical_source_id:
+		# For source-specific requests, restrict candidates strictly to the resolved source
+		target_names = set()
+		if source_hint:
+			target_names.add(source_hint.lower())
+			target_names.add(os.path.basename(source_hint).lower())
+		if canonical_source_id:
+			target_names.add(canonical_source_id.lower())
+			target_names.add(os.path.basename(canonical_source_id).lower())
 
-	#step 4: lexical (BM25) search gives us a ranking based on matching words
-	all_words_list=[]
-	for row in clean_rows:
-		all_words_list.append(get_words(row['text']))
+		for row in clean_rows:
+			r_path_lower = row["path"].lower()
+			r_base = os.path.basename(row["path"]).lower()
+			if r_base in target_names or r_path_lower in target_names:
+				candidate_rows.append(row)
 
-	bm25=BM25Okapi(all_words_list)
-	question_words=get_words(question)
-	bm25_scores=bm25.get_scores(question_words)
+		if len(candidate_rows) > 0:
+			source_exists = True
+			resolved_source = os.path.basename(candidate_rows[0]["path"])
+		else:
+			source_exists = False
+			print(f"HARD SOURCE ROUTING: Source '{source_hint}' exists but yielded 0 usable chunks. Zero fallback.")
+			return []
+	elif preferred_set:
+		# For non-source-specific queries with preferences, use preferred_set
+		target_names = set(preferred_set)
+		for row in clean_rows:
+			r_path_lower = row["path"].lower()
+			r_base = os.path.basename(row["path"]).lower()
+			if r_base in target_names or r_path_lower in target_names:
+				candidate_rows.append(row)
 
-	#pair each chunk with its bm25 score, then sort high to low
-	bm25_pairs=[]
-	for i in range(len(clean_rows)):
-		chunk_id=clean_rows[i]['chunk_id']
-		score=bm25_scores[i]
+		if len(candidate_rows) > 0:
+			source_exists = True
+			resolved_source = os.path.basename(candidate_rows[0]["path"])
+		else:
+			source_exists = False
+			return []
+
+		# Hard Runtime Validation: Ensure EVERY candidate matches target source
+		for cand in candidate_rows:
+			c_base = os.path.basename(cand["path"]).lower()
+			c_path = cand["path"].lower()
+			if c_base not in target_names and c_path not in target_names:
+				raise RuntimeError(
+					f"HARD SOURCE ROUTING VIOLATION: Candidate '{cand['path']}' does not match target source '{target_names}'"
+				)
+
+	elif query_modality != "all":
+		if query_modality == "audio":
+			audio_exts = [".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac"]
+			for row in clean_rows:
+				p_low = row["path"].lower()
+				ftype = row["file_type"].lower()
+				if ftype == "audio" or any(p_low.endswith(ext) for ext in audio_exts):
+					candidate_rows.append(row)
+
+		elif query_modality == "image":
+			img_exts = [".jpg", ".jpeg", ".png", ".webp"]
+			for row in clean_rows:
+				p_low = row["path"].lower()
+				ftype = row["file_type"].lower()
+				if ftype == "image" or any(p_low.endswith(ext) for ext in img_exts):
+					candidate_rows.append(row)
+		else:
+			candidate_rows = clean_rows
+	else:
+		candidate_rows = clean_rows
+
+	if len(candidate_rows) == 0:
+		return []
+
+
+	# Step 4: Dense Vector Embedding Search across candidate_rows
+	question_vector = generate_embedding("text", question)
+
+	# Step 5: Lexical (BM25) search ranking across candidate_rows
+	all_words_list = []
+	for row in candidate_rows:
+		all_words_list.append(get_words(row["text"]))
+
+	bm25 = BM25Okapi(all_words_list)
+	question_words = get_words(question)
+	bm25_scores = bm25.get_scores(question_words)
+
+	bm25_pairs = []
+	for i in range(len(candidate_rows)):
+		chunk_id = candidate_rows[i]["chunk_id"]
+		score = bm25_scores[i]
 		bm25_pairs.append((chunk_id, score))
+
 	def get_second_item(pair):
-		#pair looks like (chunk_id, score), we want to sort by score, which is pair[1]
-		return pair[1]			 	
-	bm25_pairs.sort(key=get_second_item, reverse=True)	
+		return pair[1]
 
-	lexical_rank={} #chunk_id: rank number 1=best
-	rank_number=1
-	for chunk_id, score in bm25_pairs[:300]:
-		lexical_rank[chunk_id]=rank_number
-		rank_number+=1
+	bm25_pairs.sort(key=get_second_item, reverse=True)
 
-	#Step 5: keep a lookup of full chunk data by chunk_id , so we can build final results later
-	chunk_data_by_id={}
+	lexical_rank = {}
+	rank_number = 1
+	for chunk_id, score in bm25_pairs:
+		lexical_rank[chunk_id] = rank_number
+		rank_number += 1
+
+	# Dense ranking
+	dense_results = doc_table.search(question_vector).metric("cosine").limit(300).to_list() if doc_table else []
+	cand_ids = set(r["chunk_id"] for r in candidate_rows)
+
+	dense_rank = {}
+	rank_number = 1
 	for doc in dense_results:
-		chunk_data_by_id[doc['chunk_id']]=doc
+		if doc["chunk_id"] in cand_ids:
+			dense_rank[doc["chunk_id"]] = rank_number
+			rank_number += 1
 
-	for row in clean_rows:
-		if row['chunk_id'] not in chunk_data_by_id:
-			chunk_data_by_id[row['chunk_id']]={
-				"chunk_id":row["chunk_id"],
-				'path':row['path'],
-				'file_type':row['file_type'],
-				'text':row['text'],
-			}
+	for r in candidate_rows:
+		if r["chunk_id"] not in dense_rank:
+			dense_rank[r["chunk_id"]] = len(dense_rank) + 1
 
-	#step 6: combine both rankings using RRF (Reciprocal Rank Fusion)
-	#a chunk that ranks well in either search gets a good combined score
-	k=60 #standard RRf constant
+	chunk_data_by_id = {r["chunk_id"]: r for r in candidate_rows}
 
-	all_chunks_ids=set(list(dense_rank.keys())+list(lexical_rank.keys()))
+	# Step 6: Reciprocal Rank Fusion (RRF)
+	k = 60
+	all_candidate_chunk_ids = list(cand_ids)
 
-	combined_score=[]
-	for chunk_id in all_chunks_ids:
-		score=0.0
-
+	combined_score = []
+	for chunk_id in all_candidate_chunk_ids:
+		score = 0.0
 		if chunk_id in dense_rank:
-			score+=1/(k+dense_rank[chunk_id])
+			score += 1.0 / (k + dense_rank[chunk_id])
 
 		if chunk_id in lexical_rank:
-			score+=1/(k+lexical_rank[chunk_id])
+			score += 1.0 / (k + lexical_rank[chunk_id])
+
 		combined_score.append((chunk_id, score))
-	
-	#sort so the best combined score comes first
+
 	combined_score.sort(key=get_second_item, reverse=True)
-	top_n_for_reranking = 60
+
 	rrf_candidates = []
-	rrf_chunks_per_source = {}
-	for chunk_id, score in combined_score:
-		doc = chunk_data_by_id[chunk_id]
-		src = os.path.basename(doc["path"])
-		if rrf_chunks_per_source.get(src, 0) < 3:
-			rrf_chunks_per_source[src] = rrf_chunks_per_source.get(src, 0) + 1
-			rrf_candidates.append(doc)
-		if len(rrf_candidates) >= top_n_for_reranking:
-			break
+	for chunk_id, score in combined_score[:30]:
+		if chunk_id in chunk_data_by_id:
+			rrf_candidates.append(chunk_data_by_id[chunk_id])
 
-	
-	
+	# Step 7: CrossEncoder Reranking
+	reranked = rerank(question, rrf_candidates)
 
-	reranked=rerank(question, rrf_candidates)
-	print("\n===== RERANKED RESULTS =====")
-	
-	# for i, (doc, score) in enumerate(reranked, 1):
-		# print(f"\n#{i}")
-		# print("Score:", score)
-		# print("Source:", os.path.basename(doc["path"]))
-		# print("Text:", doc["text"][:500])
-		
-
-	#step 7: build the final list, max 3 chunks per source file
-	final_chunks=[]
-	chunks_per_source={}
-	seen_texts=set()
+	final_chunks = []
+	seen_texts = set()
 
 	if reranked:
-		is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart"])
-		text_scores = [score for doc, score in reranked if doc.get("file_type") != "image"]
-		top_text_score = text_scores[0] if text_scores else -999.0
-
-		if "rashmi" in question.lower() and "salary" in question.lower():
-			personal_docs = [doc for doc, s in reranked if "Rashmi_Barethiya" in doc.get("path", "")]
-			if not personal_docs:
-				reranked = []
-			else:
-				p_scores = rerank(question, personal_docs)
-				if not p_scores or p_scores[0][1] < -3.0:
-					reranked = []
-
-		if top_text_score < -4.3:
-			if not is_image_query:
-				reranked = [pair for pair in reranked if pair[0].get("file_type") == "image"]
-				if reranked and reranked[0][1] < -4.3:
-					reranked = []
-
-	if reranked:
-		top_doc, top_score = reranked[0]
-		is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart"])
-
-		if top_doc.get("file_type") == "image":
-			cutoff_score = top_score - 1.0
-		elif is_image_query:
-			cutoff_score = top_score - 1.2
-		else:
-			cutoff_score = max(-8.0, top_score - 3.8)
-		previous_score = None		
-
 		for doc, score in reranked:
-
-			#stop if the candidate is too far below the best result
-			if score< cutoff_score:
-				break
-
-			#stop when there is a large relevance drop
-			if(previous_score is not None and previous_score-score>3.5 and score<0.0):
-				break
-			#Normalize text for duplicate detection
-			normalized_text=re.sub(r'\s+', ' ', doc['text'].strip().lower())
-
+			if score < -5.0 and not preferred_set:
+				continue
+			normalized_text = re.sub(r"\s+", " ", doc["text"].strip().lower())
 			if normalized_text in seen_texts:
 				continue
-			
-			source_name=os.path.basename(doc['path'])
-
-			#Maximum 3 chunks from one source 	
-			count_so_far=chunks_per_source.get(source_name, 0)
-			if count_so_far>=3:
-				continue
-
-			# Accept this chunk
 			seen_texts.add(normalized_text)
-			chunks_per_source[source_name]=count_so_far+1
 			final_chunks.append(doc)
-
-			previous_score=score
-
-			#max result is now a CAP, not a target	
-			if len(final_chunks)>=max_results:
+			if len(final_chunks) >= max_results:
 				break
 
+	if not final_chunks and candidate_rows and preferred_set:
+		final_chunks = candidate_rows[:max_results]
 
-	#step 8: print what happened, useful for debugging
-	source_list=[]
-	for doc in final_chunks:
-		name=os.path.basename(doc['path'])
-		if name not in source_list:
-			source_list.append(name)
-
-	print("\nQuery: ", question)
-	# print("Relevant chunks: ", len(final_chunks))
-	# if source_list:
-	# 	print("Sources: ", ",".join(source_list))
-	# else:
-	# 	print("Sources: None")
-	
-	return final_chunks					
+	return final_chunks
+					
 
 #------Image Search-----------
 def search_images(image_path, max_results=10):
