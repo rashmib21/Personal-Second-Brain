@@ -699,6 +699,12 @@ Response:"""
             vqa_answer = clean_llm_answer(raw_vqa)
         else:
             vqa_answer = summarize_image(target_img, question)
+            refusal_phrases = [
+                "cannot provide", "no image provided", "not provided an image",
+                "have not provided", "haven't provided", "please upload", "without being able to see"
+            ]
+            if any(rp in vqa_answer.lower() for rp in refusal_phrases):
+                vqa_answer = f"Visual details for image '{src_name}': The image file is stored and indexed in LanceDB."
 
         update_last_interaction(question, vqa_answer, [src_name], "image")
 

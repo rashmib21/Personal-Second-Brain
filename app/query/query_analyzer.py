@@ -152,19 +152,23 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
             file_stem = os.path.splitext(candidate)[0]
             stem_tokens = set(extract_entity_tokens(file_stem))
 
-            match_count = 0
+            exact_match_count = 0
+            partial_match_count = 0
             for q_token in question_entity_tokens:
                 for s_token in stem_tokens:
-                    if q_token == s_token or (len(q_token) >= 4 and q_token in s_token) or (len(s_token) >= 4 and s_token in q_token):
-                        match_count += 1
+                    if q_token == s_token:
+                        exact_match_count += 1
+                        break
+                    elif (len(q_token) >= 4 and q_token in s_token) or (len(s_token) >= 4 and s_token in q_token):
+                        partial_match_count += 1
                         break
 
-            if match_count > 0:
-                scored_candidates.append((match_count, len(stem_tokens), candidate))
+            if exact_match_count > 0 or partial_match_count > 0:
+                scored_candidates.append((exact_match_count, partial_match_count, -len(stem_tokens), candidate))
 
         if scored_candidates:
-            scored_candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
-            return scored_candidates[0][2]
+            scored_candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            return scored_candidates[0][3]
 
     # Stage 3: Exact Stem & Compact Stem Matching (excluding generic media terms)
     best_exact_match = None
