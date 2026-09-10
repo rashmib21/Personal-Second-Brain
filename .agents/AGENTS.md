@@ -10,3 +10,4 @@ All frontend JavaScript/HTML/CSS code in this repository MUST follow these begin
 6. **Explicit State Handling**: Explicitly handle loading, success, and error states in API calls.
 7. **No Unnecessary Operations per Line**: Keep one statement per line. Avoid compressing multiple operations or conditional execution on a single line (e.g. `if (condition) action();`).
 8. **Interview-Friendly Code**: Structure and comment code so a student developer can easily read, explain, and defend every line during a technical interview.
+9. **Automatic Git Push**: Whenever code or documentation changes are implemented and verified, ALWAYS create modular git commits and run `git push origin main` to ensure all changes are immediately published to the user's remote GitHub repository.
