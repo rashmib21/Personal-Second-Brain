@@ -220,6 +220,34 @@ def ask(question, return_structured=False):
         clear_pending_faces
     )
 
+def is_filename_stem_match(target_token, filename):
+    """
+    Checks if a filename matches a target entity token (e.g., 'dense' matches 'dense.jpeg', 'dense2.webp', 'dense_2.png').
+    """
+    if not target_token or not filename:
+        return False
+    
+    stem = os.path.splitext(filename)[0].lower()
+    target = target_token.lower()
+    
+    if stem == target:
+        return True
+    
+    pattern = r"^" + re.escape(target) + r"[\s_\-]?\d*$"
+    if re.match(pattern, stem):
+        return True
+    
+    from app.query.query_analyzer import compact_alphanumeric
+    compact_target = compact_alphanumeric(target)
+    compact_stem = compact_alphanumeric(stem)
+    if compact_stem.startswith(compact_target):
+        suffix = compact_stem[len(compact_target):]
+        if not suffix or suffix.isdigit():
+            return True
+
+    return False
+
+
 def handle_metadata_query(question, analysis):
     """
     Handles deterministic metadata queries without calling Ollama or the LLM.
@@ -237,7 +265,7 @@ def handle_metadata_query(question, analysis):
         if not target_path:
             from app.query.query_analyzer import get_indexed_filenames, find_best_matching_source
             indexed_files = get_indexed_filenames()
-            target_file = find_best_matching_source(question.lower(), indexed_files)
+            target_file, _ = find_best_matching_source(question.lower(), indexed_files)
         else:
             target_file = os.path.basename(target_path)
 
@@ -267,7 +295,7 @@ def handle_metadata_query(question, analysis):
         return response_text, [target_file], chunk_count
 
     elif intent in ["IMAGE_FILENAME_QUERY", "image_filename_query"]:
-        from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens, compact_alphanumeric
+        from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens
         indexed_files = get_indexed_filenames()
         image_exts = (".jpg", ".jpeg", ".png", ".webp")
         indexed_images = [f for f in indexed_files if f.lower().endswith(image_exts)]
@@ -278,17 +306,17 @@ def handle_metadata_query(question, analysis):
         if entity_tokens:
             target_token = entity_tokens[0]
             for img in indexed_images:
-                img_stem = os.path.splitext(img)[0].lower()
-                if target_token in img_stem or compact_alphanumeric(target_token) in compact_alphanumeric(img_stem):
+                if is_filename_stem_match(target_token, img):
                     matched_images.append(img)
         else:
             matched_images = indexed_images
 
-        if not matched_images:
-            matched_images = indexed_images
-
         matched_images.sort()
-        response_text = "\n".join(matched_images)
+        if matched_images:
+            response_text = "\n".join(matched_images)
+        else:
+            response_text = f"No images found matching '{entity_tokens[0] if entity_tokens else ''}'."
+
         print("\n===== QUERY INTENT =====")
         print(f"Intent: {intent}")
         print("\n===== METADATA QUERY EXECUTION =====")
@@ -296,7 +324,7 @@ def handle_metadata_query(question, analysis):
         return response_text, matched_images, len(matched_images)
 
     elif intent in ["IMAGE_COUNT_QUERY", "image_count_query"]:
-        from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens, compact_alphanumeric
+        from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens
         indexed_files = get_indexed_filenames()
         image_exts = (".jpg", ".jpeg", ".png", ".webp")
         indexed_images = [f for f in indexed_files if f.lower().endswith(image_exts)]
@@ -307,15 +335,15 @@ def handle_metadata_query(question, analysis):
         if entity_tokens:
             target_token = entity_tokens[0]
             for img in indexed_images:
-                img_stem = os.path.splitext(img)[0].lower()
-                if target_token in img_stem or compact_alphanumeric(target_token) in compact_alphanumeric(img_stem):
+                if is_filename_stem_match(target_token, img):
                     matched_images.append(img)
         else:
             matched_images = indexed_images
 
         matched_images.sort()
         count = len(matched_images)
-        response_text = f"Found {count} image(s) matching criteria."
+        response_text = f"{count}" if "how many" in question.lower() else f"Found {count} image(s) matching criteria."
+
         print("\n===== QUERY INTENT =====")
         print(f"Intent: {intent}")
         print("\n===== METADATA QUERY EXECUTION =====")
@@ -385,17 +413,22 @@ def ask(question, return_structured=False):
 
     last_state = get_last_interaction()
 
-    # Print Standardized Debug Log: Query Intent & Source Resolution
-    print("\n===== QUERY INTENT =====")
+    # Print Standardized Debug Log
+    print("\n===== QUERY =====")
+    print(f"Question: {question}")
+    print("\n===== INTENT =====")
     print(f"Intent: {intent}")
-    print(f"Temporal intent: {temporal_intent}")
+    print("\n===== MODALITY =====")
     print(f"Modality: {modality}")
-
+    print("\n===== EXPLICIT SOURCE DETECTED =====")
+    print(f"Explicit source requested: {bool(source_hint)}")
+    print("\n===== NORMALIZED SOURCE QUERY =====")
+    print(f"Normalized source query: {source_hint}")
     print("\n===== SOURCE RESOLUTION =====")
-    print(f"Requested source: {source_hint}")
-    print(f"Resolved source: {os.path.basename(canonical_source_id) if canonical_source_id else source_hint}")
-    print(f"Canonical path: {canonical_source_id}")
-    print(f"Resolution method: {'exact_stem_or_token' if canonical_source_id else 'unresolved'}")
+    print(f"Requested: {source_hint}")
+    print(f"Resolved: {os.path.basename(canonical_source_id) if canonical_source_id else source_hint}")
+    print(f"Confidence: {analysis.get('source_confidence', 0.0)}")
+    print(f"Method: {'fuzzy_or_exact_token' if canonical_source_id else 'unresolved'}")
 
     # Check for Temporal Query Intent first
     if temporal_intent != "none":
@@ -425,11 +458,17 @@ def ask(question, return_structured=False):
     resolved_source_path = canonical_source_id if canonical_source_id else source_hint
     source_exists = bool(resolved_source_path and os.path.exists(resolved_source_path))
 
-    # Handle unresolved audio source query cleanly
-    if source_hint == "UNRESOLVED_AUDIO_SOURCE":
-        unresolved_msg = "I couldn't identify the requested audio source in the indexed database."
+    # Handle unresolved explicit source query cleanly without falling back to unrelated files
+    unresolved_explicit_source = analysis.get("unresolved_explicit_source", False)
+    if (source_hint and str(source_hint).startswith("UNRESOLVED_")) or unresolved_explicit_source:
+        clean_name = str(source_hint).replace("UNRESOLVED_SOURCE_", "").replace("UNRESOLVED_AUDIO_SOURCE", "").strip()
+        target_display = clean_name.capitalize() if clean_name else "requested"
+        unresolved_msg = f"I couldn't reliably identify the requested {target_display} file, so I won't use another file to answer this question."
+        
+        print("\n===== SOURCE FILTER =====")
+        print(f"Source filter: UNRESOLVED ({source_hint}) -> 0 candidates retrieved. Preventing fallback to unrelated files.")
+        
         update_last_interaction(question, unresolved_msg, [], modality)
-
         if return_structured:
             return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
         return unresolved_msg, [], 0
@@ -772,19 +811,28 @@ Response:"""
     # Step 6: Build Grounded Prompt for LLM (NO FAKE NAME INJECTIONS)
     source_context_label = f"Source File: {os.path.basename(resolved_source_path)}\n" if resolved_source_path else ""
 
-    # Detect user question language for Language Control (Section 15)
+    # Detect user question language for Language Control
     is_hindi_question = any("\u0900" <= c <= "\u097f" for c in question) or any(
-        hw in question_lower for hw in ["kya", "baatein", "hui", "hai", "kaun", "batao"]
+        hw in question_lower for hw in ["kya", "baatein", "hui", "hai", "kaun", "batao", "bataiye", "call me", "me kya"]
     )
-    lang_instruction = "Respond in Hindi / Hinglish matching the user's question language." if is_hindi_question else "Respond in clear English."
+    
+    if is_hindi_question:
+        translated_hint = "What was discussed in this audio recording / call?" if any(w in question_lower for w in ["baatein", "discuss", "hua", "summary", "con call"]) else question
+        lang_instruction = (
+            f"The user asked in Hindi/Hinglish: '{question}' (Meaning: '{translated_hint}'). "
+            "Provide a clear, helpful, and strictly grounded summary/answer in natural Hindi or Hinglish based ONLY on facts in the retrieved context."
+        )
+    else:
+        lang_instruction = "Respond in clear, professional English."
 
     prompt = f"""Answer the user's question using ONLY the retrieved context below.
 
 STRICT GROUNDING RULES:
-1. Rely strictly on facts explicitly stated in the retrieved context. Never invent meanings, dates, numbers, company names, or personal names.
+1. Rely strictly on facts explicitly stated in the retrieved context. Never invent meanings, dates, numbers, company names, family names, or personal names.
 2. Identify topics, people, and events directly from the text.
-3. If the transcript or context text contains noisy ASR words or unclear names, preserve the uncertainty rather than guessing fictitious company or personal names.
-4. {lang_instruction}
+3. If the user asks for names, aliases, or background of a person or entity, list ONLY the exact names explicitly stated in the context text. Do NOT invent full names, father names, grandfather names, or aliases from external world knowledge.
+4. If the transcript or context text contains noisy ASR words or unclear names, preserve the raw transcript wording or state that the name is unclear rather than guessing fictitious company or personal names.
+5. {lang_instruction}
 
 {source_context_label}Retrieved Context:
 {context_str}
@@ -796,7 +844,7 @@ Answer:"""
     grounded_sys_instruction = (
         "You are a strictly grounded Personal Second Brain Assistant. "
         "Answer ONLY using facts present in the retrieved context. "
-        "Do NOT invent concepts, dates, numbers, company names, or personal face identities."
+        "Do NOT invent concepts, dates, numbers, company names, father names, or personal face identities."
     )
 
     try:
