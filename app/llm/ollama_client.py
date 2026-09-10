@@ -1,34 +1,45 @@
-import ollama 
+import ollama
 
-MODEL_NAME="llama3.2"
+MODEL_NAME = "llama3.2"
 
-def ask_llama(prompt):
+def ask_llama(prompt, system_instruction=None):
+    """
+    Sends a prompt to Ollama with temperature=0.0 for strictly grounded generation.
+    """
+    messages = []
+    
+    if system_instruction:
+        messages.append({
+            "role": "system",
+            "content": system_instruction
+        })
+    else:
+        messages.append({
+            "role": "system",
+            "content": (
+                "You are a strictly grounded Personal Second Brain Assistant. "
+                "Answer ONLY using facts explicitly present in the retrieved context. "
+                "Do NOT invent concepts, dates, numbers, inventory, or technical accounting terms."
+            )
+        })
 
-	#Send a prompt to Ollama and return the response
-	response=ollama.chat(
-		model=MODEL_NAME,
-		messages=[
-			{
-				"role":"user",
-				"content":prompt,
-			}])
-	return response['message']['content']
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
 
-if __name__=='__main__':
-	print("="*100)
-	print("Local AI Assistant (Llama 3.2)")
-	print("Type 'exit' to quit")
-	print("="*100)
+    response = ollama.chat(
+        model=MODEL_NAME,
+        messages=messages,
+        options={
+            "temperature": 0.0
+        }
+    )
+    return response["message"]["content"]
 
-	while True:
-		user_input=input("\nYou: ").strip()
-		if user_input.lower() in ['exit','quit']:
-			print("\nGoodbye!")
-			break
-		if not user_input:
-			continue
-		try:
-			answer=ask_llama(user_input)
-			print("\nLlama: ", answer)
-		except Exception as e:
-			print(f"\nError: {e}")		
+
+if __name__ == "__main__":
+    print("=" * 100)
+    print("Local AI Assistant (Llama 3.2)")
+    print("=" * 100)
+    print(ask_llama("Hello!"))

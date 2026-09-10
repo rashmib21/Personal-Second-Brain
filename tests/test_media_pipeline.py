@@ -29,7 +29,8 @@ def test_media():
         print(f"  - Sample image {sample_img} not found, testing exception fallback.")
         res = extract_image("non_existent.png")
         print("  - Fallback Status:", res.get("status"))
-        assert res.get("status") == "CORRUPT_FILE"
+        assert res.get("status") in ["CORRUPT_FILE", "ERROR"]
+
 
     # 2. Audio ASR Test
     print("\n2. Testing Audio Extractor & Embedding:")

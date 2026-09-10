@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import tempfile
 import torch
@@ -68,7 +69,9 @@ def transcribe_audio(audio_path):
                     if res:
                         t_obj = res[0]
                         if t_obj.text:
-                            full_text_parts.append(t_obj.text.strip())
+                            cleaned_part = clean_asr_hallucination_loops(t_obj.text.strip())
+                            if cleaned_part:
+                                full_text_parts.append(cleaned_part)
                         if t_obj.language and detected_lang == "unknown":
                             detected_lang = t_obj.language
                     start_sec += segment_length
@@ -93,15 +96,94 @@ def transcribe_audio(audio_path):
             }
 
         transcription=result[0]
+        cleaned_text = clean_asr_hallucination_loops(transcription.text)
 
         return {
-            "text": transcription.text,
+            "text": cleaned_text,
             "language": transcription.language or "unknown",
             "words": []
         }
 
     except Exception as e:
         raise RuntimeError(f"Speech-to-text failed: {e}")
+
+
+def clean_asr_hallucination_loops(raw_text):
+    """
+    Cleans transcript text by stripping ASR hallucination loops, 
+    repeating phrases, repeating Hindi/English patterns, and duplicate line fragments.
+    Follows beginner-friendly guidelines with explicit logic steps and comments.
+    """
+    if not raw_text:
+        return ""
+
+    # Step 1: Remove known ASR hallucination pattern strings (Hindi and English)
+    text = raw_text
+    text = re.sub(r"(?:आप\s*देखने\s*के\s*लिए\s*धन्यवाद\s*)+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:देखने\s*के\s*लिए\s*धन्यवाद\s*)+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:धन्यवाद\s*){3,}", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:(?:और|इसके\s*बाद)\s*)?यहाँ\s*आपको\s*एक\s*बार\s*फिर\s*इसके\s*बारे\s*में\s*सीखना\s*है\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:(?:अब\s*)?आप\s*देख\s*सकते\s*हैं\s*कि\s*यह\s*एक\s*बड़ा\s*विवरण\s*बना\s*रहा\s*है\s*(?:जो)?\s*)+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:(?:अतः\s*यह\s*एक\s*नियतकार्य\s*है\s*जो\s*)?आप\s*देख\s*सकते\s*हैं\s*जैसे\s*कि\s*)?(?:और\s*)?आप\s*इस\s*पेज\s*पर\s*जाते\s*हैं\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:आर्गेनिक\s*रिडाइवेक्टिंग\s*)+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:अधिकतम\s*वर्गीकृत\s*\d*%?\s*)+", "", text, flags=re.IGNORECASE)
+
+    # Step 2: Remove repeating single words (3 or more consecutive identical words, e.g. "so so so so", "right right right")
+    text = re.sub(r"\b(\w+)(?:\s+\1){2,}\b", r"\1", text, flags=re.IGNORECASE)
+
+    # Step 3: Remove repeating short & long phrase loops (1 to 15 words repeating 1 or more times)
+    for _ in range(3):
+        text = re.sub(r"\b((?:\w+\s+){1,15}\w+)(?:\s+\1){1,}\b", r"\1", text, flags=re.IGNORECASE)
+
+    # Step 4: Line by line cleaning & deduplication
+    raw_lines = text.split("\n")
+    processed_lines = []
+    previous_line_lower = None
+
+    for line_item in raw_lines:
+        stripped_line = line_item.strip()
+
+        # Skip empty lines
+        if not stripped_line:
+            continue
+
+        # Skip if identical to previous line
+        current_line_lower = stripped_line.lower()
+        if current_line_lower == previous_line_lower:
+            continue
+
+        # Check for phrase repetitions within line again after sentence splitting
+        words_in_line = stripped_line.split()
+        if len(words_in_line) >= 4:
+            # Deduplicate contiguous repeated phrase chunks inside single line
+            unique_line_words = []
+            word_idx = 0
+            while word_idx < len(words_in_line):
+                matched_phrase_len = 0
+                max_check_len = min(10, (len(words_in_line) - word_idx) // 2)
+                for phrase_len in range(max_check_len, 0, -1):
+                    first_slice = words_in_line[word_idx : word_idx + phrase_len]
+                    second_slice = words_in_line[word_idx + phrase_len : word_idx + 2 * phrase_len]
+                    if [w.lower() for w in first_slice] == [w.lower() for w in second_slice]:
+                        matched_phrase_len = phrase_len
+                        break
+
+                if matched_phrase_len > 0:
+                    unique_line_words.extend(words_in_line[word_idx : word_idx + matched_phrase_len])
+                    word_idx += 2 * matched_phrase_len
+                else:
+                    unique_line_words.append(words_in_line[word_idx])
+                    word_idx += 1
+
+            stripped_line = " ".join(unique_line_words)
+
+        if stripped_line:
+            processed_lines.append(stripped_line)
+            previous_line_lower = current_line_lower
+
+    final_cleaned_transcript = "\n".join(processed_lines).strip()
+    return final_cleaned_transcript
+
 
 
 

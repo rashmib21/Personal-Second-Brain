@@ -85,6 +85,25 @@ def extract_person_name_from_question(question):
         if name not in ["faces", "face", "person", "someone", "people", "all"]:
             return name
 
+    # Check for direct verification query patterns: "is Rashmi in mummy.jpg?", "in mummy.jpg there is Rashmi found?", "does mummy.jpg contain Rashmi?"
+    m_is_in = re.search(r"\bis\s+([a-z0-9_]+)\s+in\b", q)
+    if m_is_in:
+        name = m_is_in.group(1).strip()
+        if name not in ["there", "this", "that", "it", "he", "she", "anyone", "someone"]:
+            return name
+
+    m_found = re.search(r"\bthere\s+is\s+([a-z0-9_]+)\s+(found|present)\b", q)
+    if m_found:
+        name = m_found.group(1).strip()
+        if name not in ["a", "an", "the", "one", "someone", "anyone"]:
+            return name
+
+    m_contain = re.search(r"\bcontains?\s+([a-z0-9_]+)\b", q)
+    if m_contain:
+        name = m_contain.group(1).strip()
+        if name not in ["faces", "face", "person", "someone", "people", "all", "a", "an", "the"]:
+            return name
+
     # Check for preposition pattern: "(picture/image/photo) of/containing/with (the/a/an)? <name>"
     m_prep = re.search(r"\b(image|images|picture|pictures|photo|photos|face|faces)\s+(of|containing|with|having)\s+(the\s+|a\s+|an\s+|my\s+)?([a-z0-9_]+)\b", q)
     if m_prep:
@@ -115,34 +134,23 @@ def extract_person_name_from_question(question):
 
 def search_images_by_face(question, max_results=10):
     """
-    Searches LanceDB for images containing faces or matching a specific person's face embeddings.
-
-    Returns:
-        list of dicts containing matching image paths and metadata:
-        [
-            {
-                "type": "image",
-                "image_path": "/path/to/image.jpg",
-                "path": "/path/to/image.jpg",
-                "source": "image.jpg",
-                ...
-            }
-        ]
+    Searches LanceDB for images matching a specific person's registered face embeddings using vector distance.
+    Enforces strict vector distance thresholding without filename matching or CLIP fallback.
     """
+    from app.services.face_service import search_images_by_registered_face
+
     ftable = get_face_table()
     if ftable is None:
         print("Face table is not available.")
         return []
 
-    df = ftable.to_pandas()
     person_name = extract_person_name_from_question(question)
 
     print("\n===== FACE MEMORY SEARCH =====")
     if person_name:
         print(f"Target Person Name: '{person_name}'")
-        matched_records = find_faces_for_person(person_name, threshold=0.35, max_results=max_results)
+        matched_records = search_images_by_registered_face(person_name, max_results=max_results)
 
-        # Standardize structured dictionary items for matched records
         results = []
         if matched_records:
             for rec in matched_records:
@@ -155,37 +163,12 @@ def search_images_by_face(question, max_results=10):
                 results.append(item)
             return results
 
-        # Fallback: check if an indexed image file path has person_name in filename
-        matched_paths = set()
-        if not df.empty and "image_path" in df.columns:
-            for p in df["image_path"].dropna().unique():
-                if person_name.lower() in os.path.basename(p).lower():
-                    matched_paths.add(p)
-
-        itable = get_image_table()
-        if itable is not None:
-            idf = itable.to_pandas()
-            if not idf.empty and "path" in idf.columns:
-                for p in idf["path"].dropna().unique():
-                    if person_name.lower() in os.path.basename(p).lower():
-                        matched_paths.add(p)
-
-        if matched_paths:
-            for p in sorted(list(matched_paths))[:max_results]:
-                results.append({
-                    "type": "image",
-                    "image_path": p,
-                    "path": p,
-                    "source": os.path.basename(p),
-                    "matched_by_filename": True
-                })
-            return results
-
-        print(f"No face memory record or matching image filename found for '{person_name}'.")
+        print(f"No registered face memory record found matching '{person_name}'.")
         return []
 
     else:
         print("Target Query: Generic Face Search (all images containing faces)")
+        df = ftable.to_pandas()
         if df.empty:
             print("No face embeddings indexed yet.")
             return []
@@ -203,3 +186,4 @@ def search_images_by_face(question, max_results=10):
             })
         print(f"Found {len(results)} image(s) containing detected faces.")
         return results
+

@@ -429,4 +429,151 @@ def search_images_by_text(question, max_results=5):
 		print("Source: ", os.path.basename(result['path']))
 	return results		
 
+
+def get_full_transcript_for_source(source_path):
+	"""
+	Retrieves ALL transcript chunks for a source file from LanceDB documents table in original sequence order.
+	Strips chunk header prefixes, deduplicates repeating ASR loops, removes chunk overlap duplication, and reconstructs the clean transcript.
+	Returns tuple: (reconstructed_transcript_text, chunk_count)
+	"""
+	doc_table = get_table()
+	if doc_table is None or doc_table.count_rows() == 0:
+		return "", 0
+
+	df_doc = doc_table.to_pandas()
+	if df_doc.empty:
+		return "", 0
+
+	target_base = os.path.basename(source_path).lower()
+	matching_rows = []
+
+	for i in range(len(df_doc)):
+		row = df_doc.iloc[i]
+		r_path = str(row.get("path", ""))
+		r_base = os.path.basename(r_path).lower()
+		if r_base == target_base or source_path.lower() in r_path.lower():
+			matching_rows.append(row)
+
+	if not matching_rows:
+		return "", 0
+
+	cleaned_chunks = []
+	for row in matching_rows:
+		text = str(row.get("text", ""))
+		if text.startswith("File:"):
+			parts = text.split("\n", 1)
+			if len(parts) > 1:
+				text = parts[1]
+		cleaned_chunks.append(text.strip())
+
+	# Deduplicate adjacent chunk overlaps (e.g. trailing words of Chunk N matching leading words of Chunk N+1)
+	reconstructed_parts = []
+	for chunk_text in cleaned_chunks:
+		if not chunk_text:
+			continue
+
+		if not reconstructed_parts:
+			reconstructed_parts.append(chunk_text)
+			continue
+
+		prev_chunk = reconstructed_parts[-1]
+		prev_words = prev_chunk.split()
+		curr_words = chunk_text.split()
+
+		# Look for longest word overlap at boundary (up to 15 words)
+		overlap_len = 0
+		max_check = min(15, len(prev_words), len(curr_words))
+
+		for n in range(max_check, 0, -1):
+			if prev_words[-n:] == curr_words[:n]:
+				overlap_len = n
+				break
+
+		if overlap_len > 0:
+			trimmed_curr = " ".join(curr_words[overlap_len:])
+			if trimmed_curr:
+				reconstructed_parts.append(trimmed_curr)
+		else:
+			reconstructed_parts.append(chunk_text)
+
+	combined_raw = "\n".join(reconstructed_parts)
+
+	# Clean repeating ASR hallucination lines, phrase loops, and Hindi filler loops
+	from app.services.speech_to_text import clean_asr_hallucination_loops
+	reconstructed_transcript = clean_asr_hallucination_loops(combined_raw)
+	return reconstructed_transcript, len(matching_rows)
+
+
+def get_stored_ocr_text_for_image(source_path):
+	"""
+	Retrieves stored OCR text for an image by searching both LanceDB image_documents and documents tables.
+	Strips VLM refusal header lines (e.g. 'I cannot provide an analysis of a video...') and extracts pure OCR text.
+	Returns tuple: (ocr_text, chunk_count)
+	"""
+	if not source_path:
+		return "", 0
+
+	target_base = os.path.basename(source_path).lower()
+	matching_rows = []
+
+	# 1. Search image_table
+	image_table = get_image_table()
+	if image_table is not None and image_table.count_rows() > 0:
+		df_img = image_table.to_pandas()
+		if not df_img.empty:
+			for i in range(len(df_img)):
+				row = df_img.iloc[i]
+				r_path = str(row.get("path", ""))
+				r_base = os.path.basename(r_path).lower()
+				if r_base == target_base or source_path.lower() in r_path.lower():
+					matching_rows.append(row)
+
+	# 2. Search main documents table for image text chunks
+	doc_table = get_table()
+	if doc_table is not None and doc_table.count_rows() > 0:
+		df_doc = doc_table.to_pandas()
+		if not df_doc.empty:
+			for i in range(len(df_doc)):
+				row = df_doc.iloc[i]
+				r_path = str(row.get("path", ""))
+				r_base = os.path.basename(r_path).lower()
+				if r_base == target_base or source_path.lower() in r_path.lower():
+					matching_rows.append(row)
+
+	if not matching_rows:
+		return "", 0
+
+	ocr_lines = []
+	seen_lines = set()
+
+	for row in matching_rows:
+		raw_text = str(row.get("text", ""))
+
+		# Split into lines and filter refusal strings and header lines
+		lines = raw_text.split("\n")
+		for line in lines:
+			stripped = line.strip()
+			if not stripped:
+				continue
+
+			# Skip header prefixes and VLM refusal sentences
+			if stripped.startswith("File:") or stripped.startswith("Visual Summary") or stripped.startswith("Faces Detected:"):
+				continue
+			if any(refusal in stripped.lower() for refusal in [
+				"cannot provide an analysis", "upload the video", "not provided a specific image",
+				"cannot summarize", "without being able to see"
+			]):
+				continue
+			if stripped == "OCR Text:":
+				continue
+
+			if stripped not in seen_lines:
+				seen_lines.add(stripped)
+				ocr_lines.append(stripped)
+
+	full_ocr = "\n".join(ocr_lines).strip()
+	return full_ocr, len(matching_rows)
+
+
+
 		

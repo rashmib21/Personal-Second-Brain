@@ -42,30 +42,42 @@ def prepare_image_for_vlm(image_path, max_size=768):
 
 def summarize_image(image_path, question=None):
     """
-    Analyze an image using Qwen2.5-VL.
+    Analyze an image using Qwen2.5-VL for Visual Question Answering (VQA).
 
-    - If a question is provided, answer that question.
-    - If no question is provided, generate a general image summary.
+    - Answers questions strictly from visual contents of image.
+    - Never invents or guesses personal names / identities.
     """
+    if not image_path or not os.path.exists(image_path):
+        source_name = os.path.basename(image_path) if image_path else "the requested image"
+        return f"No usable visual information was found for {source_name}."
 
-    prepared_image, temporary_file = prepare_image_for_vlm(image_path)
+    try:
+        prepared_image, temporary_file = prepare_image_for_vlm(image_path)
+    except Exception:
+        source_name = os.path.basename(image_path)
+        return f"No usable visual information was found for {source_name}."
 
     try:
         if question and question.strip():
-            is_summary_req = any(w in question.lower() for w in ["summarize", "summary", "describe", "overview"])
-            if is_summary_req:
+            is_summary_or_text_req = any(w in question.lower() for w in [
+                "summarize", "summarise", "summary", "describe", "overview",
+                "text", "read", "transcribe", "writing", "content", "words", "letter",
+                "inside", "say", "written", "code", "topic", "kafka", "redis"
+            ])
+            if is_summary_or_text_req:
                 prompt = f"""You are a Vision Language Assistant.
 
-Analyze the provided image carefully and provide a clear, concise summary of the visual content according to the request.
+Analyze the provided image carefully and fulfill the request. If the image contains handwritten or printed text, diagrams, or code, read and transcribe the visible information thoroughly.
 
 User Request:
 {question.strip()}
 
 Rules:
-- Provide a helpful, clear summary of what is visible in the image.
-- Do not invent information.
+- Provide a clear, accurate, and detailed answer reading all visible text, diagrams, code, titles, dates, numbers, and key facts.
+- Do not invent information or names not present in the visual image.
+- Do NOT guess personal names or personal identities for people unless written in text.
 
-Summary:"""
+Response:"""
             else:
                 prompt = f"""You are a Vision Language Assistant.
 
@@ -79,6 +91,7 @@ Rules:
 - Answer ONLY the question asked.
 - Do not provide unrelated information.
 - Do not guess or invent information.
+- Do NOT assign or guess personal names or personal identities (e.g., Rashmi). Describe visual features, counts, or clothing only.
 - If the requested information is not visible in the image, say:
   "Information not found in the image."
 - For YES/NO questions, answer ONLY:
@@ -87,6 +100,7 @@ Rules:
   NO
 
 Answer:"""
+
 
         else:
 
@@ -98,13 +112,10 @@ If the image contains text:
 
 If the image contains no text:
 - Describe the important visual content.
-- Identify the main objects, people, scene, diagram, chart, or other relevant elements.
-
-If the image contains both text and visual information:
-- Combine the important textual and visual information.
+- Identify the main objects, people count, scene, diagram, chart, or other relevant elements.
 
 Rules:
-- Do not invent information.
+- Do not invent information or personal identities.
 - Only describe information that can actually be observed in the image.
 """
 
@@ -124,6 +135,10 @@ Rules:
         )
 
         return response["message"]["content"].strip()
+
+    except Exception as e:
+        source_name = os.path.basename(image_path)
+        return f"No usable visual information was found for {source_name}."
 
     finally:
 

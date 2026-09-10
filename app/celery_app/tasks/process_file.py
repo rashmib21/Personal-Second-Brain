@@ -4,7 +4,7 @@ import os
 import uuid
 
 from app.extractors.router import extract_file
-from app.storage.lancedb_store import save_file_hash, is_file_processed, store_chunk, store_image_chunk, store_face_record
+from app.storage.lancedb_store import save_file_hash, is_file_processed, store_chunk, store_image_chunk, store_face_record, deduplicate_and_store_faces
 from app.embeddings.embedding_router import generate_embedding
 from app.chunker.chunker import chunk_text
 from app.embeddings.image_embedding import embed_image
@@ -78,22 +78,27 @@ def route_file(self, event):
                 image_embedding=image_embedding
         )
 
+        # Store image text chunks in main text vector table for unified RAG text search
+        for chunk in chunks:
+            c_id = str(uuid.uuid4())
+            embedding = generate_embedding(file_type, chunk)
+            store_chunk(
+                chunk_id=c_id,
+                path=path,
+                file_type=file_type,
+                text=chunk,
+                embedding=embedding
+            )
+
         #Extract face embeddings and store in face_embeddings table
         try:
             detected_faces = detect_and_embed_faces(path)
-            for face in detected_faces:
-                face_id = str(uuid.uuid4())
-                store_face_record(
-                    face_id=face_id,
-                    image_path=path,
-                    bbox=face["bbox"],
-                    face_embedding=face["embedding"],
-                    person_name="unknown"
-                )
+            stored_recs = deduplicate_and_store_faces(path, detected_faces)
             if detected_faces:
-                logger.info(f"Stored {len(detected_faces)} face embedding(s) for {filename}")
+                logger.info(f"Stored/deduplicated {len(stored_recs)} face embedding(s) for {filename}")
         except Exception as e:
             logger.warning(f"Failed to extract face embeddings for {filename}: {e}")
+
     #------------------------        
     #PDF/Other paged documents        
     #------------------------

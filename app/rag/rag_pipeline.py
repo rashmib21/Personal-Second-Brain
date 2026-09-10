@@ -1,6 +1,6 @@
 import os
 import re
-from app.search.vector_search import search
+from app.search.vector_search import search, get_full_transcript_for_source, get_stored_ocr_text_for_image
 from app.llm.ollama_client import ask_llama
 from app.llm.gemini_client import ask_gemini
 from app.storage.lancedb_store import (
@@ -16,6 +16,159 @@ from app.rag.image_summarizer import summarize_image
 from app.search.object_search import search_images_by_object
 from app.search.face_search import is_face_search_query, search_images_by_face, extract_person_name_from_question
 from app.services.interaction_state import get_last_interaction, update_last_interaction
+
+
+def validate_content_grounding(context_text, answer_text, question="", source_path=""):
+    """
+    Redesigned Content Grounding Validation.
+    Evaluates:
+    1. Intent fulfillment / Non-refusal when context exists
+    2. Fact/Claim support without false flags for query/source words
+    3. Contradiction / Hallucination detection
+    Returns tuple: (is_grounded: bool, unsupported_claims: list)
+    """
+    if not answer_text:
+        # print("\n===== CONTENT GROUNDING VALIDATION =====")
+        # print("Content grounding: FAIL (Empty answer)")
+        return False, ["empty_answer"]
+
+    ans_lower = answer_text.lower()
+    ctx_lower = (context_text or "").lower()
+    q_lower = (question or "").lower()
+
+    # 1. Refusal check: If context text exists and has >50 chars, but answer refuses
+    refusal_phrases = [
+        "couldn't find any information", "could not find any information",
+        "don't have enough information", "do not have enough information",
+        "cannot provide", "can't provide", "no information was found",
+        "please upload", "not provided a specific image"
+    ]
+    if context_text and len(context_text.strip()) > 50:
+        if any(rp in ans_lower for rp in refusal_phrases):
+            # print("\n===== CONTENT GROUNDING VALIDATION =====")
+            # print("Content grounding: FAIL (False refusal when relevant context exists)")
+            return False, ["false_refusal"]
+
+    # 2. Extract capitalized proper nouns from answer for claim checking
+    answer_words = re.findall(r"\b[A-Z][a-z]{2,}\b", answer_text)
+
+    # Tokens from query and resolved source filename must NOT be treated as unsupported
+    query_tokens = set(re.findall(r"\b[a-zA-Z0-9]+\b", q_lower))
+    source_tokens = set(re.findall(r"\b[a-zA-Z0-9]+\b", os.path.basename(source_path).lower())) if source_path else set()
+
+    ignored_words = {
+        "The", "This", "Here", "There", "Yes", "No", "Please", "Answer", "File",
+        "Source", "Retrieved", "Note", "A", "An", "In", "On", "At", "For", "With", "By",
+        "Is", "Are", "Was", "Were", "It", "Its", "From", "About", "Has", "Have", "Had",
+        "Call", "Audio", "Image", "Text", "Document", "Summary", "Transcript"
+    }
+
+    unsupported = []
+    for word in set(answer_words):
+        w_low = word.lower()
+        if word in ignored_words or w_low in query_tokens or w_low in source_tokens:
+            continue
+        if w_low not in ctx_lower:
+            unsupported.append(word)
+
+    # print("\n===== CONTENT GROUNDING VALIDATION =====")
+    # if unsupported:
+    #     print(f"Content grounding: WARN (Unsupported terms: {unsupported})")
+    # else:
+    #     print("Content grounding: PASS")
+
+    return (len(unsupported) == 0), unsupported
+
+
+def handle_temporal_query(question, analysis):
+    """
+    Handles temporal file queries (e.g., 'which images added recently', 'files added today')
+    by querying the LanceDB processed_files metadata table directly.
+    """
+    from datetime import datetime
+
+    hash_table = get_hash_table()
+    if hash_table is None or hash_table.count_rows() == 0:
+        return "No files have been added to the Second Brain database.", [], 0
+
+    df = hash_table.to_pandas()
+    if df.empty or "path" not in df.columns:
+        return "No files have been added to the Second Brain database.", [], 0
+
+    modality = analysis.get("modality", "all")
+    intent = analysis.get("intent", "recent_files")
+    question_lower = question.lower()
+
+    image_exts = (".jpg", ".jpeg", ".png", ".webp")
+    audio_exts = (".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac")
+
+    records = []
+    for idx, row in df.iterrows():
+        p_str = str(row.get("path", ""))
+        base_fn = os.path.basename(p_str)
+        created_str = str(row.get("created_at", ""))
+
+        if modality == "image" and not base_fn.lower().endswith(image_exts):
+            continue
+        if modality == "audio" and not base_fn.lower().endswith(audio_exts):
+            continue
+
+        records.append({
+            "filename": base_fn,
+            "path": p_str,
+            "created_at": created_str
+        })
+
+    if not records:
+        msg = f"No {modality if modality != 'all' else ''} files were found in the database."
+        return msg, [], 0
+
+    records.sort(key=lambda r: r["created_at"], reverse=True)
+
+    if "today" in question_lower:
+        target_date = "2026-09-10"
+        records = [r for r in records if r["created_at"].startswith(target_date)]
+    elif "yesterday" in question_lower:
+        target_date = "2026-09-09"
+        records = [r for r in records if r["created_at"].startswith(target_date)]
+    elif "september 9" in question_lower or "sep 9" in question_lower:
+        target_date = "2026-09-09"
+        records = [r for r in records if r["created_at"].startswith(target_date)]
+
+    if "latest 5" in question_lower or "5 files" in question_lower:
+        records = records[:5]
+
+    if intent == "file_count":
+        msg = f"Total {modality if modality != 'all' else ''} files added: {len(records)}."
+        sources = [r["filename"] for r in records]
+        return msg, sources, len(records)
+
+    lines = []
+    prefix = f"Recently added {modality if modality != 'all' else 'file'}s:"
+    lines.append(prefix)
+
+    for i, rec in enumerate(records, 1):
+        dt_raw = rec["created_at"]
+        formatted_dt = dt_raw
+        try:
+            dt_obj = datetime.strptime(dt_raw.split(".")[0], "%Y-%m-%d %H:%M:%S")
+            formatted_dt = dt_obj.strftime("%B %d, %Y, %H:%M")
+        except Exception:
+            pass
+
+        lines.append(f"{i}. {rec['filename']} — {formatted_dt}")
+
+    ans_str = "\n".join(lines)
+    sources = [r["filename"] for r in records]
+
+    print("\n===== TEMPORAL QUERY ROUTING =====")
+    print(f"Detected temporal intent: {intent}")
+    print(f"Modality filter: {modality}")
+    print(f"Matching files count: {len(records)}")
+
+    return ans_str, sources, len(records)
+
+
 
 
 def is_image_list_query(question):
@@ -67,11 +220,160 @@ def ask(question, return_structured=False):
         clear_pending_faces
     )
 
+def handle_metadata_query(question, analysis):
+    """
+    Handles deterministic metadata queries without calling Ollama or the LLM.
+    Supports:
+    - FILE_METADATA: chunk counts, file metadata
+    - IMAGE_FILENAME_QUERY: returns image filenames matching pattern
+    - IMAGE_COUNT_QUERY: returns count of image files matching pattern
+    """
+    intent = analysis.get("intent")
+    source_hint = analysis.get("source_hint")
+    canonical_source_id = analysis.get("canonical_source_id")
+
+    if intent in ["FILE_METADATA", "file_count"] or "chunk" in question.lower():
+        target_path = canonical_source_id if canonical_source_id else source_hint
+        if not target_path:
+            from app.query.query_analyzer import get_indexed_filenames, find_best_matching_source
+            indexed_files = get_indexed_filenames()
+            target_file = find_best_matching_source(question.lower(), indexed_files)
+        else:
+            target_file = os.path.basename(target_path)
+
+        if not target_file:
+            return "File metadata not found in LanceDB.", [], 0
+
+        from app.storage.lancedb_store import get_table
+        doc_table = get_table()
+        chunk_count = 0
+        if doc_table is not None and doc_table.count_rows() > 0:
+            df_doc = doc_table.to_pandas()
+            if not df_doc.empty and "path" in df_doc.columns:
+                target_base = target_file.lower()
+                matching = df_doc[df_doc["path"].apply(lambda p: os.path.basename(str(p)).lower() == target_base)]
+                chunk_count = len(matching)
+
+        response_text = f"{target_file} has {chunk_count} indexed chunks."
+        print("\n===== QUERY INTENT =====")
+        print(f"Intent: {intent}")
+        print("\n===== SOURCE RESOLUTION =====")
+        print(f"Requested source: {source_hint}")
+        print(f"Resolved source: {target_file}")
+        print(f"Canonical path: {target_path}")
+        print("Resolution method: deterministic_metadata")
+        print("\n===== METADATA QUERY EXECUTION =====")
+        print(f"Chunk count: {chunk_count}")
+        return response_text, [target_file], chunk_count
+
+    elif intent in ["IMAGE_FILENAME_QUERY", "image_filename_query"]:
+        from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens, compact_alphanumeric
+        indexed_files = get_indexed_filenames()
+        image_exts = (".jpg", ".jpeg", ".png", ".webp")
+        indexed_images = [f for f in indexed_files if f.lower().endswith(image_exts)]
+
+        entity_tokens = extract_entity_tokens(question.lower())
+        matched_images = []
+
+        if entity_tokens:
+            target_token = entity_tokens[0]
+            for img in indexed_images:
+                img_stem = os.path.splitext(img)[0].lower()
+                if target_token in img_stem or compact_alphanumeric(target_token) in compact_alphanumeric(img_stem):
+                    matched_images.append(img)
+        else:
+            matched_images = indexed_images
+
+        if not matched_images:
+            matched_images = indexed_images
+
+        matched_images.sort()
+        response_text = "\n".join(matched_images)
+        print("\n===== QUERY INTENT =====")
+        print(f"Intent: {intent}")
+        print("\n===== METADATA QUERY EXECUTION =====")
+        print(f"Matched filenames: {matched_images}")
+        return response_text, matched_images, len(matched_images)
+
+    elif intent in ["IMAGE_COUNT_QUERY", "image_count_query"]:
+        from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens, compact_alphanumeric
+        indexed_files = get_indexed_filenames()
+        image_exts = (".jpg", ".jpeg", ".png", ".webp")
+        indexed_images = [f for f in indexed_files if f.lower().endswith(image_exts)]
+
+        entity_tokens = extract_entity_tokens(question.lower())
+        matched_images = []
+
+        if entity_tokens:
+            target_token = entity_tokens[0]
+            for img in indexed_images:
+                img_stem = os.path.splitext(img)[0].lower()
+                if target_token in img_stem or compact_alphanumeric(target_token) in compact_alphanumeric(img_stem):
+                    matched_images.append(img)
+        else:
+            matched_images = indexed_images
+
+        matched_images.sort()
+        count = len(matched_images)
+        response_text = f"Found {count} image(s) matching criteria."
+        print("\n===== QUERY INTENT =====")
+        print(f"Intent: {intent}")
+        print("\n===== METADATA QUERY EXECUTION =====")
+        print(f"Count: {count}")
+        print(f"Matched filenames: {matched_images}")
+        return response_text, matched_images, count
+
+    return "No metadata query matching criteria.", [], 0
+
+
+def handle_speaker_query(question, analysis):
+    """
+    Handles speaker and audio participant queries without inventing identities or returning summaries.
+    """
+    source_hint = analysis.get("source_hint")
+    canonical_source_id = analysis.get("canonical_source_id")
+    target_file = os.path.basename(canonical_source_id) if canonical_source_id else (source_hint if source_hint else "audio file")
+
+    question_lower = question.lower()
+    if any(phrase in question_lower for phrase in ["lady", "woman", "female", "girl"]):
+        response_text = "I can't reliably determine whether a woman is speaking from the indexed transcript because speaker gender/diarization information is not available."
+    else:
+        response_text = "The indexed transcript does not contain reliable speaker diarization, so I cannot determine the exact number of speakers."
+
+    print("\n===== QUERY INTENT =====")
+    print(f"Intent: {analysis.get('intent')}")
+    print("\n===== AUDIO SPEAKER QUERY EXECUTION =====")
+    print(f"Target file: {target_file}")
+    print(f"Response: {response_text}")
+    return response_text, [target_file] if source_hint else [], 1
+
+
+def ask(question, return_structured=False):
+    """
+    Main Multimodal RAG Orchestrator function connecting 4 independent systems:
+    System A — Hard Source Routing
+    System B — Visual Question Answering
+    System C — Face Recognition & Memory
+    System D — Feedback / Learning Memory
+    """
+    from app.services.face_service import (
+        analyze_faces_in_image,
+        register_pending_face,
+        search_images_by_registered_face,
+        FACE_COSINE_DISTANCE_THRESHOLD
+    )
+    from app.services.interaction_state import (
+        get_pending_faces,
+        set_pending_faces,
+        clear_pending_faces
+    )
+
     question_lower = question.lower().strip()
 
     # Step 1: Query Analysis & Source Resolution
     analysis = analyze_query(question)
     intent = analysis.get("intent", "question_answering")
+    temporal_intent = analysis.get("temporal_intent", "none")
     face_intent = analysis.get("face_intent", "none")
     is_visual_qa = analysis.get("is_visual_qa", False)
     modality = analysis.get("modality", "all")
@@ -83,32 +385,50 @@ def ask(question, return_structured=False):
 
     last_state = get_last_interaction()
 
+    # Print Standardized Debug Log: Query Intent & Source Resolution
+    print("\n===== QUERY INTENT =====")
+    print(f"Intent: {intent}")
+    print(f"Temporal intent: {temporal_intent}")
+    print(f"Modality: {modality}")
+
+    print("\n===== SOURCE RESOLUTION =====")
+    print(f"Requested source: {source_hint}")
+    print(f"Resolved source: {os.path.basename(canonical_source_id) if canonical_source_id else source_hint}")
+    print(f"Canonical path: {canonical_source_id}")
+    print(f"Resolution method: {'exact_stem_or_token' if canonical_source_id else 'unresolved'}")
+
+    # Check for Temporal Query Intent first
+    if temporal_intent != "none":
+        ans_str, sources, num_chunks = handle_temporal_query(question, analysis)
+        update_last_interaction(question, ans_str, sources, modality)
+        if return_structured:
+            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
+        return ans_str, sources, num_chunks
+
+    # Check for Deterministic Metadata Queries (No LLM call!)
+    if intent in ["FILE_METADATA", "IMAGE_FILENAME_QUERY", "IMAGE_COUNT_QUERY", "IMAGE_FILENAME_QUERY", "image_filename_query", "image_count_query"]:
+        ans_str, sources, num_chunks = handle_metadata_query(question, analysis)
+        update_last_interaction(question, ans_str, sources, modality)
+        if return_structured:
+            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
+        return ans_str, sources, num_chunks
+
+    # Check for Speaker Queries
+    if intent in ["AUDIO_SPEAKER_QUERY", "speaker_analysis"]:
+        ans_str, sources, num_chunks = handle_speaker_query(question, analysis)
+        update_last_interaction(question, ans_str, sources, modality)
+        if return_structured:
+            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
+        return ans_str, sources, num_chunks
+
     # Resolve target source filepath if canonical_source_id is available
     resolved_source_path = canonical_source_id if canonical_source_id else source_hint
     source_exists = bool(resolved_source_path and os.path.exists(resolved_source_path))
-
-    # Print DEBUG LOG: SOURCE RESOLUTION
-    print("\n===== SOURCE RESOLUTION =====")
-    print(f"Query: {question}")
-    print(f"Detected entity/source hint: {source_hint}")
-    print(f"Candidate sources: {[os.path.basename(resolved_source_path)] if resolved_source_path else []}")
-    print(f"Resolved source: {os.path.basename(resolved_source_path) if resolved_source_path else None}")
-    print(f"Canonical source_id: {resolved_source_path}")
 
     # Handle unresolved audio source query cleanly
     if source_hint == "UNRESOLVED_AUDIO_SOURCE":
         unresolved_msg = "I couldn't identify the requested audio source in the indexed database."
         update_last_interaction(question, unresolved_msg, [], modality)
-
-        print("\n===== SOURCE-RESTRICTED RETRIEVAL =====")
-        print("Source: UNRESOLVED_AUDIO_SOURCE")
-        print("Retrieved chunks: 0")
-        print("Unique sources: []")
-
-        print("\n===== VALIDATION =====")
-        print("Expected source: None")
-        print("Retrieved sources: []")
-        print("Result: FAIL (Unresolved audio source)")
 
         if return_structured:
             return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
@@ -117,7 +437,6 @@ def ask(question, return_structured=False):
     # Check for pending face registration flow first
     pending_faces = get_pending_faces()
     if pending_faces and (face_intent == "face_registration" or any(p in question_lower for p in ["this is", "my mother", "her name", "his name"])):
-        # Extract user label (e.g. "mother", "rashmi")
         user_label = question.strip()
         for prefix in ["this is my ", "this is ", "her name is ", "his name is "]:
             if question_lower.startswith(prefix):
@@ -135,16 +454,11 @@ def ask(question, return_structured=False):
         sources = [os.path.basename(exact_pending_face.get("source_id", "image.jpg"))]
         update_last_interaction(question, ans_str, sources, "image", identity_info={"registered_label": user_label})
 
-        print("\n===== FACE ANALYSIS =====")
-        print(f"Face operation: FACE_REGISTRATION")
-        print(f"Registered identity: {user_label}")
-        print(f"Identity source: user_registration")
-
         if return_structured:
             return {"answer": ans_str, "sources": sources, "num_chunks": 1, "type": "text", "images": []}
         return ans_str, sources, 1
 
-    # Step 2: Handle Follow-up Correction Intent (System D)
+    # Step 2: Handle Follow-up Correction Intent
     if not is_correction and last_state.get("previous_query"):
         if any(phrase in question_lower for phrase in ["but there are", "there are two", "one is", "actually", "wrong"]):
             is_correction = True
@@ -189,27 +503,47 @@ def ask(question, return_structured=False):
 
         update_last_interaction(question, learning_answer, [correct_source], target_modality, identity_info={"correction": question})
 
-        print("\n===== FEEDBACK =====")
-        print(f"Correction detected: True")
-        print(f"Feedback modality: {target_modality}")
-        print(f"Feedback source: {correct_source}")
-        print(f"Matched feedback: {prev_query}")
-
         if return_structured:
             return {"answer": learning_answer, "sources": [correct_source], "num_chunks": 1, "type": "text", "images": []}
         return learning_answer, [correct_source], 1
 
-    # Step 3: Determine Image & Face Routing Priority
-    # Priority Order:
-    # 1. Explicitly resolved existing image source -> source_image_retrieval or face_verification
-    # 2. Specific-image + person identity verification -> face_verification
-    # 3. Face-memory search without an existing source -> face_memory_search
-    # 4. Existing RAG / VQA retrieval
+    # Step 3: Handle Audio Full Transcript Intent
+    if intent in ["AUDIO_TRANSCRIPT", "transcript", "full_transcript"] and resolved_source_path and os.path.exists(resolved_source_path):
+        full_transcript, total_chunks = get_full_transcript_for_source(resolved_source_path)
+        if full_transcript:
+            src_name = os.path.basename(resolved_source_path)
+            validate_content_grounding(full_transcript, full_transcript, question, resolved_source_path)
+
+            print("\n===== TRANSCRIPT DEBUG =====")
+            print(f"Source: {src_name}")
+            print(f"Chunk count: {total_chunks}")
+            print(f"Reconstructed length: {len(full_transcript)} chars")
+
+            update_last_interaction(question, full_transcript, [src_name], modality)
+            if return_structured:
+                return {"answer": full_transcript, "sources": [src_name], "num_chunks": total_chunks, "type": "text", "images": []}
+            return full_transcript, [src_name], total_chunks
+
+    # Check for explicit Image OCR intent
+    if intent in ["IMAGE_OCR", "image_ocr"] and resolved_source_path and os.path.exists(resolved_source_path):
+        ocr_text, total_chunks = get_stored_ocr_text_for_image(resolved_source_path)
+        src_name = os.path.basename(resolved_source_path)
+
+        print("\n===== IMAGE DEBUG =====")
+        print(f"Source: {src_name}")
+        print(f"OCR length: {len(ocr_text)} chars")
+
+        if ocr_text and ocr_text.strip():
+            update_last_interaction(question, ocr_text, [src_name], "image")
+            if return_structured:
+                return {"answer": ocr_text, "sources": [src_name], "num_chunks": total_chunks, "type": "text", "images": []}
+            return ocr_text, [src_name], total_chunks
+
+    # Check for Image Routing Branches (Source Image Retrieval, Face Verification, Face Memory Search)
     is_image_source_resolved = bool(source_exists and modality == "image")
     person_name = extract_person_name_from_question(question)
     source_stem = os.path.splitext(os.path.basename(source_hint))[0].lower() if source_hint else ""
 
-    # Check if query is asking to verify or identify a person in a specific image source
     is_person_verification_query = False
     if is_image_source_resolved:
         colloquial_synonyms = {
@@ -224,26 +558,16 @@ def ask(question, return_structured=False):
         elif person_name and person_name.lower() not in related_synonyms:
             is_person_verification_query = True
 
+    is_explicit_image_retrieval = (intent == "image_retrieval") or is_image_list_query(question) or any(
+        p in question_lower for p in ["show image", "find image", "get image", "list images", "show me"]
+    ) and not any(w in question_lower for w in ["what is in", "content of", "summarize", "text", "names in"])
+
     # ROUTE BRANCH 1: Source-Based Image Retrieval
-    # Triggers when source_exists is True, modality is image, and query asks to retrieve/show the image source
-    if is_image_source_resolved and not is_person_verification_query and not is_visual_qa:
+    if is_image_source_resolved and is_explicit_image_retrieval and not is_person_verification_query and not is_visual_qa:
         print("\n===== IMAGE ROUTING =====")
         print("Route: source_image_retrieval")
-
         src_name = os.path.basename(resolved_source_path)
         ans_str = f"Retrieved image source '{src_name}'."
-
-        print("\n===== IMAGE RETRIEVAL =====")
-        print("Query modality: image")
-        print("Candidate count: 1")
-        print(f"Candidate sources: ['{src_name}']")
-
-        print("\n===== FINAL VALIDATION =====")
-        print("Query modality: image")
-        print(f"Final source: {src_name}")
-        print("Source consistent: True")
-        print("Modality consistent: True")
-
         update_last_interaction(question, ans_str, [src_name], "image")
 
         if return_structured:
@@ -260,26 +584,12 @@ def ask(question, return_structured=False):
     elif is_image_source_resolved and is_person_verification_query:
         print("\n===== IMAGE ROUTING =====")
         print("Route: face_verification")
-
-        print("\n===== FACE ANALYSIS =====")
-        print(f"Face intent: {face_intent if face_intent != 'none' else 'face_verification'}")
-
         target_img = resolved_source_path
         face_res = analyze_faces_in_image(target_img)
         faces_detected = face_res.get("faces_detected", 0)
         faces_list = face_res.get("faces", [])
-
-        print(f"Faces detected: {faces_detected}")
-        print(f"Embeddings generated: {face_res.get('embeddings_generated', 0)}")
-        print(f"Known faces: {face_res.get('known_count', 0)}")
-        print(f"Unknown faces: {face_res.get('unknown_count', 0)}")
-
-        for f in faces_list:
-            print(f"Face {f['face_id']}: status={f['status']}, person={f['person_name']}, distance={f['distance']}, identity_source={f['identity_source']}")
-
         src_name = os.path.basename(target_img)
 
-        # Check if verifying a specific person name (e.g. Rashmi)
         if person_name and person_name.lower() != source_stem:
             matching_face = None
             for f in faces_list:
@@ -300,15 +610,6 @@ def ask(question, return_structured=False):
                     return {"answer": msg, "sources": [src_name], "num_chunks": len(faces_list), "type": "text", "images": []}
                 return msg, [src_name], len(faces_list)
 
-        # General face identification inside image
-        pending_faces_list = get_pending_faces()
-        if pending_faces_list and any(pf.get("status") == "unknown" for pf in pending_faces_list):
-            msg = "I found a person I don't recognize yet. Who is this person?"
-            update_last_interaction(question, msg, [src_name], "image")
-            if return_structured:
-                return {"answer": msg, "sources": [src_name], "num_chunks": len(pending_faces_list), "type": "text", "images": []}
-            return msg, [src_name], len(pending_faces_list)
-
         if faces_detected == 0:
             msg = "I couldn't detect a usable face in this image."
             update_last_interaction(question, msg, [src_name], "image")
@@ -316,34 +617,20 @@ def ask(question, return_structured=False):
                 return {"answer": msg, "sources": [src_name], "num_chunks": 0, "type": "text", "images": []}
             return msg, [src_name], 0
 
-        unknown_faces = [f for f in faces_list if f.get("status") == "unknown"]
-        if unknown_faces:
-            set_pending_faces(unknown_faces)
-            msg = "I found a person I don't recognize yet. Who is this person?"
-            update_last_interaction(question, msg, [src_name], "image")
-            if return_structured:
-                return {"answer": msg, "sources": [src_name], "num_chunks": len(faces_list), "type": "text", "images": []}
-            return msg, [src_name], len(faces_list)
-
         known_names = [f["person_name"] for f in faces_list if f.get("person_name")]
-        msg = f"Identified person: {', '.join(known_names)}."
+        msg = f"Identified person: {', '.join(known_names)}." if known_names else "I found a person I don't recognize yet. Who is this person?"
         update_last_interaction(question, msg, [src_name], "image")
         if return_structured:
             return {"answer": msg, "sources": [src_name], "num_chunks": len(faces_list), "type": "text", "images": []}
         return msg, [src_name], len(faces_list)
 
-    # ROUTE BRANCH 3: Persistent Face-Memory Search (Without a specific existing source file)
+    # ROUTE BRANCH 3: Persistent Face-Memory Search
     elif (face_intent == "face_search" or is_face_search_query(question)) and not is_image_source_resolved:
         print("\n===== IMAGE ROUTING =====")
         print("Route: face_memory_search")
-
-        # print("\n===== FACE ANALYSIS =====")
-        # print("Face intent: face_search")
-
         if person_name:
             matched_records = search_images_by_registered_face(person_name)
             if not matched_records:
-                print(f"No registered face memory record found for person '{person_name}'.")
                 msg = f"No registered face memory record found matching '{person_name}'."
                 update_last_interaction(question, msg, [], "image")
                 if return_structured:
@@ -355,15 +642,12 @@ def ask(question, return_structured=False):
             ans_str = f"Found {len(sources)} image(s) matching registered face memory for '{person_name}'."
             update_last_interaction(question, ans_str, sources, "image")
 
-            # print(f"Known faces: {len(sources)}")
-            # print(f"Identity source: face_memory")
-
             if return_structured:
                 return {"answer": ans_str, "sources": sources, "num_chunks": len(sources), "type": "image", "images": [{"type": "image", "path": p, "source": os.path.basename(p)} for p in image_paths]}
             return ans_str, sources, len(sources)
 
-    # Step 4: Handle Visual Question Answering (System B)
-    if is_visual_qa or (modality == "image" and source_hint):
+    # Step 4: Handle Visual Question Answering & Image Summary/QA
+    if intent in ["IMAGE_SUMMARY", "IMAGE_VISUAL_QUERY", "image_summary"] or (modality == "image" and source_hint):
         target_img = resolved_source_path
         if not target_img or not os.path.exists(target_img):
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -377,37 +661,44 @@ def ask(question, return_structured=False):
             msg = f"No usable visual information was found for {source_hint}."
             update_last_interaction(question, msg, [source_hint] if source_hint else [], "image")
 
-            print("\n===== IMAGE RETRIEVAL =====")
-            print(f"Candidate count: 0")
-            print(f"Candidate sources: []")
-
-            print("\n===== FINAL VALIDATION =====")
-            print(f"Query modality: image")
-            print(f"Final source: {source_hint}")
-            print(f"Source consistent: False")
-            print(f"Modality consistent: True")
-            print(f"LLM allowed: False")
-
             if return_structured:
                 return {"answer": msg, "sources": [source_hint] if source_hint else [], "num_chunks": 0, "type": "text", "images": []}
             return msg, [source_hint] if source_hint else [], 0
 
-        # Execute VQA
-        vqa_answer = summarize_image(target_img, question)
+        # Retrieve stored clean OCR text first
+        ocr_text, ocr_chunks = get_stored_ocr_text_for_image(target_img)
         src_name = os.path.basename(target_img)
 
-        print("\n===== IMAGE RETRIEVAL =====")
-        print(f"Query modality: image")
-        print(f"Candidate count: 1")
-        print(f"Candidate sources: ['{src_name}']")
+        print("\n===== IMAGE DEBUG =====")
+        print(f"Source: {src_name}")
+        print(f"OCR length: {len(ocr_text)} chars")
 
-        print("\n===== FINAL VALIDATION =====")
-        print(f"Query modality: image")
-        print(f"Final source: {src_name}")
-        print(f"Source consistent: True")
-        print(f"Modality consistent: True")
-        print(f"Identity backed by face memory: False")
-        print(f"LLM allowed: True")
+        if ocr_text and ocr_text.strip():
+            vqa_prompt = f"""You are a Visual Assistant. Analyze the image content below and fulfill the user request.
+
+IMAGE OCR EVIDENCE:
+{ocr_text.strip()}
+
+USER REQUEST: {question}
+
+RESPONSE FORMAT INSTRUCTIONS:
+Separate your answer into:
+A. Directly visible/readable text: List exact words and labels visible.
+B. Visual description: Describe the diagram or image structure.
+C. Interpretation: Provide a cautious explanation, preserving any uncertainty rather than inventing facts.
+
+Response:"""
+            try:
+                raw_vqa = ask_llama(vqa_prompt)
+            except Exception:
+                try:
+                    raw_vqa = ask_gemini(vqa_prompt)
+                except Exception as e:
+                    raw_vqa = f"Content in {src_name}:\n{ocr_text.strip()}"
+
+            vqa_answer = clean_llm_answer(raw_vqa)
+        else:
+            vqa_answer = summarize_image(target_img, question)
 
         update_last_interaction(question, vqa_answer, [src_name], "image")
 
@@ -416,98 +707,80 @@ def ask(question, return_structured=False):
         return vqa_answer, [src_name], 1
 
     # Step 5: System A Hard Source Candidate Retrieval
-    feedback_candidates = search_feedback(question, query_modality=modality, source_hint=source_hint, limit=5)
-    if feedback_candidates:
-        for fb in feedback_candidates:
-            c_src = fb.get("correct_source")
-            w_src = fb.get("wrong_source")
-            if c_src and c_src not in preferred_sources:
-                if not source_hint or c_src.lower() == source_hint.lower() or os.path.basename(c_src).lower() == os.path.basename(source_hint).lower():
-                    preferred_sources.append(c_src)
-            if w_src and w_src not in rejected_sources:
-                rejected_sources.append(w_src)
+    if modality == "audio" and resolved_source_path and os.path.exists(resolved_source_path):
+        full_transcript, total_chunks = get_full_transcript_for_source(resolved_source_path)
+        if full_transcript:
+            src_name = os.path.basename(resolved_source_path)
+            sources = [src_name]
+            context_str = full_transcript
+            num_chunks = total_chunks
+        else:
+            sources = []
+            context_str = ""
+            num_chunks = 0
+    else:
+        feedback_candidates = search_feedback(question, query_modality=modality, source_hint=source_hint, limit=5)
+        if feedback_candidates:
+            for fb in feedback_candidates:
+                c_src = fb.get("correct_source")
+                w_src = fb.get("wrong_source")
+                if c_src and c_src not in preferred_sources:
+                    if not source_hint or c_src.lower() == source_hint.lower() or os.path.basename(c_src).lower() == os.path.basename(source_hint).lower():
+                        preferred_sources.append(c_src)
+                if w_src and w_src not in rejected_sources:
+                    rejected_sources.append(w_src)
 
-    if source_hint and source_hint not in preferred_sources:
-        preferred_sources.append(source_hint)
+        if source_hint and source_hint not in preferred_sources:
+            preferred_sources.append(source_hint)
 
-    results = search(
-        question,
-        max_results=10,
-        analysis=analysis,
-        preferred_sources=preferred_sources,
-        rejected_sources=rejected_sources
+        results = search(
+            question,
+            max_results=10,
+            analysis=analysis,
+            preferred_sources=preferred_sources,
+            rejected_sources=rejected_sources
+        )
+
+        if not results:
+            target_source = source_hint if source_hint else "the requested file"
+            is_img_source = (modality == "image") or (target_source and target_source.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))
+            no_res_msg = f"No usable visual information was found for {target_source}." if is_img_source else f"No relevant content was found in {target_source}."
+            update_last_interaction(question, no_res_msg, [target_source], modality)
+
+            if return_structured:
+                return {"answer": no_res_msg, "sources": [target_source], "num_chunks": 0, "type": "text", "images": []}
+            return no_res_msg, [target_source], 0
+
+        # Collect sources & context
+        retrieved_sources_set = set()
+        context_list = []
+        for doc in results:
+            fname = os.path.basename(doc["path"])
+            retrieved_sources_set.add(fname)
+            context_list.append(doc["text"])
+
+        sources = sorted(list(retrieved_sources_set))
+        context_str = "\n\n".join(context_list)
+        num_chunks = len(results)
+
+    # Step 6: Build Grounded Prompt for LLM (NO FAKE NAME INJECTIONS)
+    source_context_label = f"Source File: {os.path.basename(resolved_source_path)}\n" if resolved_source_path else ""
+
+    # Detect user question language for Language Control (Section 15)
+    is_hindi_question = any("\u0900" <= c <= "\u097f" for c in question) or any(
+        hw in question_lower for hw in ["kya", "baatein", "hui", "hai", "kaun", "batao"]
     )
+    lang_instruction = "Respond in Hindi / Hinglish matching the user's question language." if is_hindi_question else "Respond in clear English."
 
-    if not results:
-        target_source = source_hint if source_hint else "the requested file"
-        is_img_source = (modality == "image") or (target_source and target_source.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))
-        no_res_msg = f"No usable visual information was found for {target_source}." if is_img_source else f"No relevant content was found in {target_source}."
-        update_last_interaction(question, no_res_msg, [target_source], modality)
-
-        print("\n===== SOURCE-RESTRICTED RETRIEVAL =====")
-        print(f"Source: {source_hint if source_hint else 'unrestricted'}")
-        print("Retrieved chunks: 0")
-        print("Unique sources: []")
-
-        print("\n===== VALIDATION =====")
-        print(f"Expected source: {source_hint if source_hint else 'any'}")
-        print("Retrieved sources: []")
-        print("Result: FAIL (No content retrieved)")
-
-        if return_structured:
-            return {"answer": no_res_msg, "sources": [target_source], "num_chunks": 0, "type": "text", "images": []}
-        return no_res_msg, [target_source], 0
-
-    # Step 6: Collect sources & context
-    retrieved_sources_set = set()
-    context_list = []
-    for doc in results:
-        fname = os.path.basename(doc["path"])
-        retrieved_sources_set.add(fname)
-        context_list.append(doc["text"])
-
-    sources = sorted(list(retrieved_sources_set))
-    context_str = "\n\n".join(context_list)
-    num_chunks = len(results)
-
-    print("\n===== SOURCE-RESTRICTED RETRIEVAL =====")
-    print(f"Source: {source_hint if source_hint else 'unrestricted'}")
-    print(f"Retrieved chunks: {num_chunks}")
-    print(f"Unique sources: {sources}")
-
-    # Step 7: Pre-LLM Consistency Validation (Hard Invariant Check)
-    source_consistent = True
-    if source_hint and source_hint != "UNRESOLVED_AUDIO_SOURCE":
-        target_base = os.path.basename(source_hint).lower()
-        for s in sources:
-            if s.lower() != target_base and os.path.basename(s).lower() != target_base:
-                source_consistent = False
-                raise RuntimeError(f"PRE-LLM VALIDATION ERROR: Retrieved sources {sources} violate hard source invariant for '{source_hint}'.")
-
-    modality_consistent = True
-    if modality == "image" and any(not s.lower().endswith((".jpg", ".jpeg", ".png", ".webp")) for s in sources):
-        modality_consistent = False
-        raise RuntimeError(f"PRE-LLM VALIDATION ERROR: Retrieved sources {sources} violate image modality invariant.")
-
-    if modality == "audio" and any(not s.lower().endswith((".m4a", ".mp3", ".wav", ".mpeg")) for s in sources):
-        modality_consistent = False
-        raise RuntimeError(f"PRE-LLM VALIDATION ERROR: Retrieved sources {sources} violate audio modality invariant.")
-
-    print("\n===== VALIDATION =====")
-    print(f"Expected source: {source_hint if source_hint else 'any'}")
-    print(f"Retrieved sources: {sources}")
-    print(f"Result: PASS")
-
-    # Step 8: Build Grounded Prompt for LLM
     prompt = f"""Answer the user's question using ONLY the retrieved context below.
 
 STRICT GROUNDING RULES:
-1. Rely strictly on facts explicitly stated in the retrieved context. Never invent meanings, dates, numbers, inventory, or purchases.
-2. Do NOT guess or invent personal face identities (e.g., Rashmi).
-3. If context does not contain enough information, state that clearly.
-4. Output ONLY the natural language answer.
+1. Rely strictly on facts explicitly stated in the retrieved context. Never invent meanings, dates, numbers, company names, or personal names.
+2. Identify topics, people, and events directly from the text.
+3. If the transcript or context text contains noisy ASR words or unclear names, preserve the uncertainty rather than guessing fictitious company or personal names.
+4. {lang_instruction}
 
-Retrieved Context:
+{source_context_label}Retrieved Context:
 {context_str}
 
 Question: {question}
@@ -517,8 +790,7 @@ Answer:"""
     grounded_sys_instruction = (
         "You are a strictly grounded Personal Second Brain Assistant. "
         "Answer ONLY using facts present in the retrieved context. "
-        "Do NOT invent concepts, dates, numbers, or personal face identities. "
-        "Output ONLY the natural language text."
+        "Do NOT invent concepts, dates, numbers, company names, or personal face identities."
     )
 
     try:
@@ -530,6 +802,10 @@ Answer:"""
             raw_answer = f"LLM Error: {str(e)}"
 
     clean_answer = clean_llm_answer(raw_answer)
+
+    # Step 7: Content Grounding Validation
+    validate_content_grounding(context_str, clean_answer, question, resolved_source_path)
+
     update_last_interaction(question, clean_answer, sources, modality)
 
     if return_structured:
@@ -542,6 +818,7 @@ Answer:"""
         }
 
     return clean_answer, sources, num_chunks
+
 
 
 

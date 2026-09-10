@@ -61,74 +61,64 @@ def find_document(question, df):
     Finds the document that best matches the user's query.
 
     Example:
-
-    sql professionals
-    ->
-    SQLNotesForProfessionals.pdf
-
-    linux
-    ->
-    linux.pdf
+    summarize the audio.mpeg -> audio.mpeg
+    summarize the audio MLKDream -> MLKDream.mp3
     """
+    if df is None or df.empty or "path" not in df.columns:
+        return None
 
-    question = question.lower()
+    question_lower = question.lower()
 
-    query_words = re.findall(
-        r"\b[a-z0-9]+\b",
-        question
-    )
+    # Common English stop words and command filler words
+    stop_words = {
+        "the", "a", "an", "of", "in", "from", "to", "and", "or", "is", "for",
+        "with", "on", "at", "by", "this", "that", "my", "please",
+        "summarize", "summarise", "summary", "chapter", "section", "part", "file", "show", "get"
+    }
 
-    ignored_words = [
-        "summarize",
-        "summarise",
-        "summary",
-        "chapter",
-        "section",
-        "part",
-        "of",
-        "the",
-        "from",
-        "in",
-        "my",
-        "please"
-    ]
-
-    useful_words = []
-
-    for word in query_words:
-
-        if word in ignored_words:
-            continue
-
-        if len(word) < 2:
-            continue
-
-        useful_words.append(word)
+    # Media type category terms
+    media_terms = {
+        "audio", "video", "image", "picture", "photo", "document", "pdf",
+        "doc", "docx", "txt", "text", "mp3", "mp4", "mpeg", "wav", "aac", "flac"
+    }
 
     best_path = None
-    best_matches = 0
+    best_score = -1
 
     for path in df["path"].unique():
+        if not path or not isinstance(path, str):
+            continue
 
         filename = os.path.basename(path)
-
+        filename_lower = filename.lower()
+        stem = os.path.splitext(filename)[0].lower()
         clean_name = clean_filename(filename)
 
-        filename_words = re.findall(
-            r"\b[a-z0-9]+\b",
-            clean_name
-        )
+        score = 0
 
-        matches = 0
+        # 1. Highest priority: Exact full filename (e.g. "audio.mpeg") in question -> 1000 pts
+        if filename_lower in question_lower:
+            score += 1000
 
-        for word in useful_words:
+        # 2. High priority: Exact non-generic stem (e.g. "mlkdream") in question -> 500 pts
+        elif stem and stem not in stop_words and stem not in media_terms and stem in question_lower:
+            score += 500
 
-            if word in filename_words:
-                matches = matches + 1
+        # 3. Medium priority: Token word matches
+        query_words = re.findall(r"\b[a-z0-9]+\b", question_lower)
+        filename_words = re.findall(r"\b[a-z0-9]+\b", clean_name)
 
-        if matches > best_matches:
+        for word in query_words:
+            if word in stop_words or len(word) < 2:
+                continue
+            if word in filename_words or (stem and word in stem):
+                if word in media_terms:
+                    score += 5   # lower score for generic category words
+                else:
+                    score += 20  # higher score for specific title words
 
-            best_matches = matches
+        if score > best_score and score > 0:
+            best_score = score
             best_path = path
 
     return best_path
