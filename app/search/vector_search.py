@@ -137,7 +137,7 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 		for src in preferred_sources:
 			preferred_set.add(src.lower())
 
-	if source_hint:
+	if source_hint and not str(source_hint).startswith("UNRESOLVED_"):
 		preferred_set.add(source_hint.lower())
 
 	rejected_set = set()
@@ -191,8 +191,9 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 	resolved_source = source_hint
 	source_exists = False
 
-	if source_hint == "UNRESOLVED_AUDIO_SOURCE":
-		print("HARD SOURCE ROUTING: Source is UNRESOLVED_AUDIO_SOURCE. Returning 0 candidate chunks.")
+	unresolved_flag = analysis.get("unresolved_explicit_source", False)
+	if (source_hint and str(source_hint).startswith("UNRESOLVED_")) or unresolved_flag:
+		print(f"HARD SOURCE ROUTING: Source '{source_hint}' is unresolved. Returning 0 candidate chunks to prevent cross-source fallback.")
 		return []
 
 	candidate_rows = []
