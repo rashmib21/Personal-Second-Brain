@@ -1,4 +1,10 @@
+import logging
 import ollama
+
+# Suppress HTTP request logs from httpx, httpcore, and urllib3
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 MODEL_NAME = "llama3.2"
 

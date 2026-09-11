@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import torch
 from qwen_asr import Qwen3ASRModel
+from config import DEBUG
 
 model_name = "moorlee/qwen3-asr-0.6b-hinglish"
 
@@ -12,15 +13,18 @@ model = None
 def get_asr_model():
 	global model
 	if model is None:
-		print("Loading Srota ASR model...")
+		if DEBUG:
+			print("Loading Srota ASR model...")
 		model = Qwen3ASRModel.from_pretrained(
 			model_name,
 			dtype=torch.bfloat16,
 			device_map="cuda:0",
 			max_inference_batch_size=1
 		)
-		print("Srota ASR model loaded.")
+		if DEBUG:
+			print("Srota ASR model loaded.")
 	return model
+
 
 
 def transcribe_audio(audio_path):

@@ -1,7 +1,14 @@
 import os
 import shutil
+import logging
 from pathlib import Path
 from typing import Optional, List
+
+# Suppress HTTP request logs from external clients (httpx, httpcore, urllib3)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse

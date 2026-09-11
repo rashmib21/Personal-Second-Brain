@@ -1058,106 +1058,52 @@ def summarize(question, context):
 def format_response(arg1, arg2=None, arg3=None, arg4=0, evidence=None):
     """
     Formats the clean CLI terminal output according to user-facing specifications.
-    Supports:
-    - format_response(question, res_dict)
-    - format_response(question, answer, sources, num_chunks)
-    - format_response(answer, sources, num_chunks)
+    Outputs exclusively:
+    - USER QUERY
+    - ANSWER
+    - SOURCE
+    - NUMBER OF RELEVANT CHUNKS
     """
     question = ""
     answer = ""
     sources = []
     num_chunks = 0
-    evidence_list = []
-    ocr_text = ""
-    metadata_info = {}
 
     if isinstance(arg2, dict):
         question = arg1 if isinstance(arg1, str) else ""
         answer = arg2.get("answer", "")
         sources = arg2.get("sources", [])
         num_chunks = arg2.get("num_chunks", 0)
-        evidence_list = arg2.get("evidence", [])
-        ocr_text = arg2.get("ocr_text", "")
-        metadata_info = arg2.get("metadata_info", {})
     elif isinstance(arg2, (list, tuple)) or (isinstance(arg1, str) and not isinstance(arg2, str) and arg2 is not None):
         question = ""
         answer = arg1
         sources = arg2 if arg2 is not None else []
         num_chunks = arg3 if arg3 is not None else 0
-        evidence_list = evidence if evidence is not None else []
     else:
         question = arg1 if isinstance(arg1, str) else ""
         answer = arg2 if arg2 is not None else ""
         sources = arg3 if arg3 is not None else []
-        num_chunks = arg4
-        evidence_list = evidence if evidence is not None else []
+        num_chunks = arg4 if arg4 is not None else 0
 
     header = "=" * 60
     sections = []
 
-    # 1. USER QUERY Section
+    # 1. USER QUERY
     if question and question.strip():
         sections.append(f"{header}\nUSER QUERY\n{header}\n{question.strip()}")
 
-    # 2. ANSWER Section
+    # 2. ANSWER
     sections.append(f"{header}\nANSWER\n{header}\n{answer.strip() if answer else 'No answer generated.'}")
 
-    # 3. SOURCES / RELEVANT CHUNKS Section
-    src_parts = []
-
-    # Check for Metadata Query Evidence
-    if metadata_info:
-        meta_type = metadata_info.get("type")
-        if meta_type == "image_metadata":
-            src_parts.append("Image metadata")
-        elif "chunk_count" in metadata_info:
-            target_file = metadata_info.get("target_file", sources[0] if sources else "unknown")
-            count = metadata_info.get("chunk_count", num_chunks)
-            src_parts.append(f"Source: {os.path.basename(target_file)}")
-            src_parts.append(f"Metadata: chunk_count = {count}")
-    # Check for OCR Evidence
-    elif ocr_text and ocr_text.strip():
-        src_name = os.path.basename(sources[0]) if sources else "Image"
-        src_parts.append(f"Source: {src_name}")
-        src_parts.append("")
-        src_parts.append("OCR:")
-        src_parts.append(ocr_text.strip())
-    # Check for Retrieved Chunk Evidence
-    elif evidence_list:
-        grouped_evidence = {}
-        for ev in evidence_list:
-            s_name = os.path.basename(ev.get("source", "Unknown"))
-            if s_name not in grouped_evidence:
-                grouped_evidence[s_name] = []
-            grouped_evidence[s_name].append(ev)
-
-        for s_name, chunks in grouped_evidence.items():
-            src_parts.append(f"Source: {s_name}")
-            src_parts.append("")
-            for idx, chk in enumerate(chunks, 1):
-                c_id = chk.get('chunk_id', idx)
-                chunk_label = f"Chunk {c_id}"
-                timestamp = chk.get("timestamp", "")
-                text = chk.get("text", "").strip()
-
-                src_parts.append(chunk_label)
-                if timestamp:
-                    src_parts.append(f"Timestamp: {timestamp}")
-                if text:
-                    src_parts.append(text)
-                src_parts.append("")
-    # Fallback to source list
-    elif sources:
-        if len(sources) == 1:
-            src_parts.append(f"Source: {os.path.basename(sources[0])}")
-        else:
-            for s in sources:
-                src_parts.append(f"Source: {os.path.basename(s)}")
+    # 3. SOURCE
+    if sources:
+        source_str = ", ".join([os.path.basename(s) for s in sources])
     else:
-        src_parts.append("None")
+        source_str = "None"
+    sections.append(f"{header}\nSOURCE\n{header}\n{source_str}")
 
-    sources_block = "\n".join(src_parts).strip()
-    sections.append(f"{header}\nSOURCES / RELEVANT CHUNKS\n{header}\n{sources_block}")
+    # 4. NUMBER OF RELEVANT CHUNKS
+    sections.append(f"{header}\nNUMBER OF RELEVANT CHUNKS\n{header}\n{num_chunks}")
 
     return "\n\n".join(sections)
 

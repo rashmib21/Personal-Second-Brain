@@ -2,7 +2,9 @@ import uuid
 import os
 import numpy as np
 from app.embeddings.face_embedding import detect_and_embed_faces
+from config import DEBUG
 from app.storage.lancedb_store import (
+
     get_face_table,
     store_face_record,
     deduplicate_and_store_faces,
@@ -255,7 +257,8 @@ def search_images_by_registered_face(person_name, threshold=FACE_COSINE_DISTANCE
     # Fetch registered reference embeddings for target person
     person_records = df[df["person_name"].str.lower() == person_name.lower()]
     if person_records.empty:
-        print(f"No registered face memory record found for person '{person_name}'.")
+        if DEBUG:
+            print(f"No registered face memory record found for person '{person_name}'.")
         return []
 
     reference_embeddings = person_records["face_embedding"].tolist()

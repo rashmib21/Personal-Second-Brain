@@ -2,6 +2,7 @@ import lancedb
 import os
 import pyarrow as pa
 from datetime import datetime
+from config import DEBUG
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -179,7 +180,8 @@ def store_feedback(
 	}
 
 	f_table.add([feedback_record])
-	print(f"Stored Feedback Record: {record_id} for query '{original_query}'")
+	if DEBUG:
+		print(f"Stored Feedback Record: {record_id} for query '{original_query}'")
 	return feedback_record
 
 
@@ -242,7 +244,8 @@ def save_file_hash(file_hash, path):
 			"created_at":str(datetime.now())
 		}	
 	])	
-	print(f"Saved hash: {file_hash}")
+	if DEBUG:
+		print(f"Saved hash: {file_hash}")
 
 #Store one chunk
 def store_chunk(chunk_id, path, file_type, text, embedding):
@@ -258,7 +261,8 @@ def store_chunk(chunk_id, path, file_type, text, embedding):
 		}
 	])
 
-	print(f"Stored Chunk: {chunk_id}")
+	if DEBUG:
+		print(f"Stored Chunk: {chunk_id}")
 
 #Image chunk store
 def store_image_chunk(chunk_id, path, file_type, text, image_embedding):
@@ -273,7 +277,8 @@ def store_image_chunk(chunk_id, path, file_type, text, image_embedding):
 		}
 	])	
 
-	print(f"Stored Image Chunks: {chunk_id}")
+	if DEBUG:
+		print(f"Stored Image Chunks: {chunk_id}")
 
 #Store face record
 def store_face_record(face_id, image_path, bbox, face_embedding, person_name="unknown", status="unknown", identity_source="none"):
@@ -300,7 +305,8 @@ def store_face_record(face_id, image_path, bbox, face_embedding, person_name="un
 		"created_at": str(datetime.now())
 	}
 	ftable.add([record])
-	print(f"Stored Face Record: {final_face_id} ({person_name}, status={final_status}, src={identity_source})")
+	if DEBUG:
+		print(f"Stored Face Record: {final_face_id} ({person_name}, status={final_status}, src={identity_source})")
 	return record
 
 
@@ -398,7 +404,8 @@ def update_face_record_identity(face_id, person_name, identity_source="user_regi
 	row["identity_source"] = identity_source
 
 	ftable.add([row])
-	print(f"Updated Face Record Identity: {face_id} -> '{person_name}' ({identity_source})")
+	if DEBUG:
+		print(f"Updated Face Record Identity: {face_id} -> '{person_name}' ({identity_source})")
 	return row
 
 
@@ -421,11 +428,12 @@ def total_faces():
 	return ftable.count_rows()
 
 if __name__=="__main__":
-	print("Document schema: ")
-	print(table.schema)
+	if DEBUG:
+		print("Document schema: ")
+		print(table.schema)
 
-	print("\nHash Table schema: ")
-	print(hash_table.schema)
+		print("\nHash Table schema: ")
+		print(hash_table.schema)
 
-	print("Total chunks: ",total_chunks())
-	print("Total processed files: ", total_files())
+		print("Total chunks: ",total_chunks())
+		print("Total processed files: ", total_files())
