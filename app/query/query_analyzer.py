@@ -51,7 +51,9 @@ STOP_WORDS_SET = {
     "translate", "convert", "translation", "conversion", "folder", "directory", "drive", "recent", "latest", "newest",
     "into", "onto", "within", "without", "between", "among", "under", "over", "through", "during", "before", "after", "about",
     "line", "lines", "phrase", "phrases", "word", "words", "sentence", "sentences", "item", "items",
-    "english", "hindi", "hinglish", "french", "german", "spanish", "italian", "portuguese", "japanese", "chinese", "russian"
+    "english", "hindi", "hinglish", "french", "german", "spanish", "italian", "portuguese", "japanese", "chinese", "russian",
+    "want", "wants", "wanted", "like", "likes", "liked", "would", "should", "could", "need", "needs", "needed",
+    "require", "requires", "required", "try", "trying", "ask", "asking", "asked", "know", "find", "search", "lookup"
 }
 
 

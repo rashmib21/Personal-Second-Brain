@@ -63,7 +63,10 @@ class IntentRouter:
             source_display = plan.source_spec.source_hint or "requested"
             if str(source_display).startswith("UNRESOLVED_SOURCE_"):
                 clean_name = str(source_display).replace("UNRESOLVED_SOURCE_", "").replace("UNRESOLVED_AUDIO_SOURCE", "").strip()
-                source_display = clean_name.capitalize() if clean_name else "requested"
+                if clean_name.isupper() or len(clean_name) <= 3:
+                    source_display = clean_name.upper()
+                else:
+                    source_display = clean_name.capitalize() if clean_name else "requested"
 
             if plan.modality == Modality.IMAGE or (source_display and source_display.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
                 unresolved_msg = f"No usable visual information was found for {source_display}."
