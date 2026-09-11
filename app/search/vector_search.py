@@ -352,7 +352,7 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 
 	if reranked:
 		for doc, score in reranked:
-			if score < -5.0 and not preferred_set:
+			if score < -8.0 and not preferred_set:
 				continue
 			normalized_text = re.sub(r"\s+", " ", doc["text"].strip().lower())
 			if normalized_text in seen_texts:

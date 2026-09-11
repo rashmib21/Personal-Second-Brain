@@ -3,6 +3,7 @@ import os
 import unicodedata
 import difflib
 from app.storage.lancedb_store import get_hash_table
+from app.query.query_plan import QueryPlan, QueryIntent, RequestScope, Modality, SourceSpec, QueryFilters
 
 # ============================================================
 # QUERY INTENT TAXONOMY CONSTANTS
@@ -30,9 +31,10 @@ INTENT_DOCUMENT_TEXT_QUERY = "DOCUMENT_TEXT_QUERY"
 INTENT_CORRECTION = "CORRECTION"
 
 GENERIC_MEDIA_TERMS = {
-    "audio", "image", "images", "video", "picture", "photo", "recording",
+    "audio", "image", "images", "video", "picture", "photo", "recording", "recordings",
     "sound", "file", "files", "document", "documents", "pdf", "docx", "xlsx", "mp3",
-    "m4a", "wav", "mpeg", "txt", "excel", "list", "name", "names", "page", "pages"
+    "m4a", "wav", "mpeg", "txt", "excel", "list", "name", "names", "page", "pages",
+    "transcript", "transcripts", "content", "contents", "summary", "summaries"
 }
 
 STOP_WORDS_SET = {
@@ -40,9 +42,14 @@ STOP_WORDS_SET = {
     "be", "been", "being", "have", "has", "had", "do", "does", "did", "for", "with",
     "on", "at", "by", "this", "that", "my", "please", "what", "who", "how", "which",
     "where", "when", "summarize", "summarise", "summary", "chapter", "section", "part",
-    "show", "get", "give", "said", "discussed", "listen", "recording", "content", "me",
+    "show", "get", "give", "said", "discussed", "listen", "recording", "recordings", "content", "me",
     "can", "you", "listed", "mention", "mentioned", "many", "much", "count", "number",
-    "there", "tell", "read", "named", "name", "names", "called", "titled", "images", "image", "file", "files"
+    "there", "tell", "read", "named", "name", "names", "called", "titled", "images", "image", "file", "files",
+    "all", "entire", "complete", "everything", "whole", "full", "spoken", "speech", "talk", "talking",
+    "translate", "convert", "translation", "conversion", "folder", "directory", "drive", "recent", "latest", "newest",
+    "into", "onto", "within", "without", "between", "among", "under", "over", "through", "during", "before", "after", "about",
+    "line", "lines", "phrase", "phrases", "word", "words", "sentence", "sentences", "item", "items",
+    "english", "hindi", "hinglish", "french", "german", "spanish", "italian", "portuguese", "japanese", "chinese", "russian"
 }
 
 
@@ -336,6 +343,12 @@ def analyze_query(question, indexed_files=None):
         r"\bnot\s+this\s+file\b", r"\bnot\s+this\b", r"\buse\s+.*\s+instead\b"
     ]
     is_correction = any(re.search(pat, question_lower) for pat in correction_patterns)
+    if not is_correction:
+        from app.services.interaction_state import get_last_interaction
+        last_state = get_last_interaction()
+        if last_state and last_state.get("previous_query"):
+            if any(phrase in question_lower for phrase in ["but there are", "there are two", "one is", "actually", "wrong"]):
+                is_correction = True
 
     # Step 2: Generic Metadata / File Inventory & Temporal Intent Extraction
     from app.utils.date_parser import parse_date_expression
@@ -344,12 +357,15 @@ def analyze_query(question, indexed_files=None):
     file_list_patterns = [
         r"\blist\s+(?:all\s+)?files?\b", r"\bshow\s+(?:all\s+)?files?\b", r"\blist\s+(?:all\s+)?images?\b", r"\bshow\s+(?:all\s+)?images?\b",
         r"\blist\s+(?:all\s+)?audio\b", r"\bshow\s+(?:all\s+)?audio\b", r"\blist\s+(?:all\s+)?documents?\b", r"\bshow\s+(?:all\s+)?documents?\b",
-        r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\b.*\b(?:files?|images?|audio|documents?)\b",
-        r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\baudio\s+added\b",
+        r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\b.*\b(?:files?|images?|audio|recordings?|documents?)\b",
+        r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\baudio\s+added\b", r"\brecordings?\s+added\b",
         r"\brecent\s+files?\b", r"\blatest\s+files?\b", r"\bnewest\s+files?\b", r"\bmost\s+recent\b",
         r"\brecently\s+added\b", r"\bnewly\s+added\b", r"\bdate-wise\b", r"\bdatewise\b", r"\bby\s+date\b",
-        r"\b(?:top|latest|recent|first)\s+\d+\s*(?:files?|images?|audio|documents?)\b",
-        r"\b\d+\s+(?:recent|latest)\s+(?:files?|images?|audio|documents?)\b"
+        r"\b(?:top|latest|recent|first)\s+\d+\s*(?:files?|images?|audio|recordings?|documents?)\b",
+        r"\b\d+\s+(?:recent|latest)\s+(?:files?|images?|audio|recordings?|documents?)\b",
+        r"\bwhat\s+(?:audio\s+)?files\b", r"\bnames?\s+of\s+(?:my\s+)?(?:audio\s+)?files?\b",
+        r"\brecordings?\s+in\s+(?:my\s+)?folder\b", r"\bshow\s+(?:me\s+)?(?:all\s+)?audio\s+recordings?\b",
+        r"\bshow\s+(?:every\s+)?sound\s+file\b", r"\ball\s+audio\s+recordings?\b"
     ]
     is_file_list_query = any(re.search(pat, question_lower) for pat in file_list_patterns) or (start_dt is not None)
 
@@ -443,11 +459,10 @@ def analyze_query(question, indexed_files=None):
     if source_hint is None and temporal_intent == "none":
         if has_source_phrase and len(entity_tokens) > 0:
             target_entity = entity_tokens[0]
-            source_hint = f"UNRESOLVED_SOURCE_{target_entity.upper()}"
-            unresolved_explicit_source = True
-        elif len(entity_tokens) > 0 and (modality != "all" or "file" in question_lower):
-            target_entity = entity_tokens[0]
-            source_hint = f"UNRESOLVED_SOURCE_{target_entity.upper()}"
+            if modality == "audio" or "audio" in question_lower:
+                source_hint = "UNRESOLVED_AUDIO_SOURCE"
+            else:
+                source_hint = f"UNRESOLVED_SOURCE_{target_entity.upper()}"
             unresolved_explicit_source = True
 
     # Update modality if source_hint has explicit file extension
@@ -492,7 +507,8 @@ def analyze_query(question, indexed_files=None):
         r"\bhow\s+many\s+people\s+are\s+talking\b",
         r"\bis\s+there\s+any\s+lady\s+talk\b",
         r"\bis\s+a\s+woman\s+speaking\b",
-        r"\bwho\s+is\s+speaking\b"
+        r"\bwho\s+is\s+speaking\b",
+        r"\bwho\s+speaks\b"
     ]
     is_speaker_query = any(re.search(pat, question_lower) for pat in speaker_patterns)
 
@@ -515,6 +531,8 @@ def analyze_query(question, indexed_files=None):
     # Generic detection for full-source transcript and full-source translation requests
     full_source_patterns = [
         r"\ball\s+(?:the\s+)?text\b", r"\bcomplete\s+(?:the\s+)?transcript\b",
+        r"\bcomplete\s+(?:the\s+)?text\b", r"\bfull\s+text\b", r"\bcomplete\s+document\b",
+        r"\bfull\s+document\b", r"\bentire\s+text\b", r"\bentire\s+document\b",
         r"\bentire\s+transcript\b", r"\bfull\s+transcript\b", r"\bentire\s+audio\b",
         r"\ball\s+of\s+the\s+audio\b", r"\bcomplete\s+audio\b", r"\bfull\s+content\b",
         r"\bcomplete\s+content\b", r"\beverything\s+said\b", r"\beverything\s+in\b",
@@ -522,8 +540,14 @@ def analyze_query(question, indexed_files=None):
         r"\btranslate\s+(?:the\s+)?entire\b", r"\bconvert\s+(?:the\s+)?entire\b",
         r"\btranslate\s+(?:the\s+)?whole\b", r"\bconvert\s+(?:the\s+)?whole\b",
         r"\btranslate\s+everything\b", r"\bconvert\s+everything\b",
+        r"\btranslate\s+(?:the\s+)?complete\b", r"\bconvert\s+(?:the\s+)?complete\b",
         r"\bcomplete\s+english\s+version\b", r"\bfull\s+english\s+version\b",
-        r"\bcomplete\s+translation\b", r"\bfull\s+translation\b"
+        r"\bcomplete\s+translation\b", r"\bfull\s+translation\b",
+        r"\ball\s+(?:the\s+)?spoken\s+content\b", r"\beverything\s+spoken\b",
+        r"\bfull\s+spoken\s+transcript\b", r"\ball\s+the\s+audio\s+content\b",
+        r"\ball\s+audio\s+content\b", r"\btranslate\s+every\s+spoken\s+line\b",
+        r"\bpoore\s+audio\b", r"\bcomplete\s+transcript\s+do\b", r"\bis\s+call\s+ka\s+complete\s+transcript\b",
+        r"\baudio\s+ko\s+english\s+me\s+convert\b", r"\bwithout\s+summarizing\b", r"\bwithout\s+summarising\b"
     ]
     is_full_source_request = any(re.search(pattern_string, question_lower) for pattern_string in full_source_patterns)
 
@@ -533,13 +557,6 @@ def analyze_query(question, indexed_files=None):
         r"\babout\b", r"\bregarding\b", r"\brelated\s+to\b", r"\bdiscussing\b"
     ]
     has_partial_topic_indicator = any(re.search(pat, question_lower) for pat in partial_topic_patterns)
-
-    if is_full_source_request:
-        request_scope = "complete_file"
-    elif has_partial_topic_indicator:
-        request_scope = "partial_topic"
-    else:
-        request_scope = "selective"
 
     # Detect explicit target language if requested in query
     target_language = extract_target_language(question_lower)
@@ -555,6 +572,13 @@ def analyze_query(question, indexed_files=None):
         is_full_translation_request = True
     elif is_translation_action and target_language is not None and not has_partial_topic_indicator and (modality in ["audio", "document"] or source_hint is not None):
         is_full_translation_request = True
+
+    if is_full_source_request or is_full_translation_request:
+        request_scope = "complete_file"
+    elif has_partial_topic_indicator:
+        request_scope = "partial_topic"
+    else:
+        request_scope = "selective"
 
     audio_summary_phrases = [
         "summarize", "summarise", "summary", "overview",
@@ -618,4 +642,101 @@ def analyze_query(question, indexed_files=None):
         "needs_database": True
     }
 
+    # Construct strongly-typed QueryPlan object
+    modality_enum_map = {
+        "audio": Modality.AUDIO,
+        "image": Modality.IMAGE,
+        "document": Modality.DOCUMENT,
+        "pdf": Modality.PDF,
+        "docx": Modality.DOCX,
+        "video": Modality.VIDEO,
+        "all": Modality.ALL
+    }
+    target_modality_enum = modality_enum_map.get(modality, Modality.ALL)
+
+    intent_enum_map = {
+        INTENT_CORRECTION: QueryIntent.CORRECTION,
+        INTENT_FILE_METADATA: QueryIntent.METADATA_QUERY,
+        INTENT_FILE_COUNT: QueryIntent.METADATA_QUERY,
+        INTENT_FILE_LIST: QueryIntent.METADATA_QUERY,
+        INTENT_TEMPORAL_FILE_QUERY: QueryIntent.METADATA_QUERY,
+        INTENT_IMAGE_FILENAME_QUERY: QueryIntent.METADATA_QUERY,
+        INTENT_IMAGE_COUNT_QUERY: QueryIntent.METADATA_QUERY,
+        INTENT_AUDIO_SPEAKER_QUERY: QueryIntent.SPEAKER_ANALYSIS,
+        INTENT_AUDIO_TRANSLATION: QueryIntent.FULL_CONTENT_FETCH,
+        INTENT_AUDIO_TRANSCRIPT: QueryIntent.FULL_CONTENT_FETCH,
+        INTENT_IMAGE_OCR: QueryIntent.VISUAL_QA,
+        INTENT_IMAGE_SUMMARY: QueryIntent.SUMMARIZATION if modality == "image" else QueryIntent.VISUAL_QA,
+        INTENT_AUDIO_SUMMARY: QueryIntent.SUMMARIZATION,
+        INTENT_DOCUMENT_SUMMARY: QueryIntent.SUMMARIZATION,
+        INTENT_TEXT_SEARCH: QueryIntent.QUESTION_ANSWERING
+    }
+    
+    # Generic semantic check for summarization synonyms to prevent phrase-sensitivity
+    summary_synonyms = ["summarize", "summarise", "summary", "overview", "synopsis", "tldr", "brief", "main points", "key takeaways", "what was discussed", "kya baatein", "kya discuss", "details of call"]
+    is_generic_summary = any(syn in question_lower for syn in summary_synonyms)
+
+    if is_generic_summary and intent == INTENT_TEXT_SEARCH:
+        target_intent_enum = QueryIntent.SUMMARIZATION
+        target_scope_enum = RequestScope.SUMMARY
+    else:
+        target_intent_enum = intent_enum_map.get(intent, QueryIntent.QUESTION_ANSWERING)
+        scope_enum_map = {
+            "complete_file": RequestScope.COMPLETE_FILE,
+            "summary": RequestScope.SUMMARY,
+            "selective": RequestScope.QUESTION_ANSWER,
+            "partial_topic": RequestScope.QUESTION_ANSWER
+        }
+        if target_intent_enum == QueryIntent.METADATA_QUERY:
+            target_scope_enum = RequestScope.METADATA_ONLY
+        elif target_intent_enum == QueryIntent.SUMMARIZATION:
+            target_scope_enum = RequestScope.SUMMARY
+        else:
+            target_scope_enum = scope_enum_map.get(request_scope, RequestScope.QUESTION_ANSWER)
+
+    source_is_explicit = bool(source_hint) or unresolved_explicit_source
+    
+    # Check if the resolved source actually exists in the database index or filesystem
+    indexed_lower_files = [f.lower() for f in indexed_files] if indexed_files else []
+    resolved_file_exists = False
+    if canonical_source_id and not str(canonical_source_id).startswith("UNRESOLVED_"):
+        base_name = os.path.basename(canonical_source_id).lower()
+        if base_name in indexed_lower_files or os.path.exists(canonical_source_id):
+            resolved_file_exists = True
+
+    source_is_resolved = resolved_file_exists and not unresolved_explicit_source
+
+    plan = QueryPlan(
+        raw_query=question,
+        normalized_query=question_lower,
+        intent=target_intent_enum,
+        scope=target_scope_enum,
+        modality=target_modality_enum,
+        source_spec=SourceSpec(
+            source_hint=source_hint,
+            canonical_path=canonical_source_id if resolved_file_exists else None,
+            is_explicit=source_is_explicit,
+            is_resolved=source_is_resolved,
+            confidence=source_confidence if resolved_file_exists else 0.0
+        ),
+        filters=QueryFilters(
+            start_datetime=start_dt,
+            end_datetime=end_dt,
+            date_label=date_label,
+            extracted_limit=extracted_limit,
+            target_language=target_language
+        ),
+        is_correction=is_correction,
+        metadata={"is_ocr_query": is_ocr_query, "is_image_summary_query": is_image_summary_query}
+    )
+
+    analysis_result["plan"] = plan
     return analysis_result
+
+
+def build_query_plan(question, indexed_files=None): #-> QueryPlan
+    """
+    Helper function to directly analyze a question and return a strongly-typed QueryPlan.
+    """
+    analysis = analyze_query(question, indexed_files=indexed_files)
+    return analysis["plan"]

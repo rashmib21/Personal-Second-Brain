@@ -476,7 +476,7 @@ def translate_full_transcript(full_transcript, target_language="English", source
     batches = []
     current_batch_lines = []
     current_length = 0
-    max_batch_chars = 1000
+    max_batch_chars = 4000
 
     for line in raw_lines:
         line_str = line.strip()
@@ -545,10 +545,10 @@ RAW ASR IS THE SOURCE OF TRUTH.
 FAITHFUL {target_lang_display.upper()} TRANSLATION:"""
 
         try:
-            raw_translated_batch = ask_llama(prompt, system_instruction=system_instruction)
+            raw_translated_batch = ask_gemini(prompt)
         except Exception:
             try:
-                raw_translated_batch = ask_gemini(prompt)
+                raw_translated_batch = ask_llama(prompt, system_instruction=system_instruction)
             except Exception as e:
                 raw_translated_batch = f"Translation Error: {str(e)}"
 
@@ -571,12 +571,10 @@ FAITHFUL {target_lang_display.upper()} TRANSLATION:"""
 
 def ask(question, return_structured=False):
     """
-    Main Multimodal RAG Orchestrator function connecting 4 independent systems:
-    System A — Hard Source Routing
-    System B — Visual Question Answering
-    System C — Face Recognition & Memory
-    System D — Feedback / Learning Memory
+    Main Multimodal RAG Orchestrator function.
+    Extracts QueryPlan and dispatches execution to IntentRouter.
     """
+    from app.rag.intent_router import IntentRouter
     from app.services.face_service import (
         analyze_faces_in_image,
         register_pending_face,
@@ -591,47 +589,52 @@ def ask(question, return_structured=False):
 
     question_lower = question.lower().strip()
 
-    # Step 1: Query Analysis & Source Resolution
+    # Step 1: Query Analysis & QueryPlan Construction
     analysis = analyze_query(question)
-    intent = analysis.get("intent", "question_answering")
-    temporal_intent = analysis.get("temporal_intent", "none")
-    face_intent = analysis.get("face_intent", "none")
-    is_visual_qa = analysis.get("is_visual_qa", False)
-    modality = analysis.get("modality", "all")
-    source_hint = analysis.get("source_hint")
-    canonical_source_id = analysis.get("canonical_source_id")
-    speaker_reference = analysis.get("speaker_reference")
-    is_correction = analysis.get("is_correction", False)
-    correction_details = analysis.get("correction_details", {})
-    target_language = analysis.get("target_language")
+    plan = analysis.get("plan")
 
-    last_state = get_last_interaction()
-
-    # Print Standardized Debug Log
     if DEBUG:
-        print("\n===== QUERY =====")
+        print("\n===== QUERY PLAN =====")
         print(f"Question: {question}")
-        print("\n===== INTENT =====")
-        print(f"Intent: {intent}")
-        print("\n===== MODALITY =====")
-        print(f"Modality: {modality}")
-        print("\n===== EXPLICIT SOURCE DETECTED =====")
-        print(f"Explicit source requested: {bool(source_hint)}")
-        print("\n===== NORMALIZED SOURCE QUERY =====")
-        print(f"Normalized source query: {source_hint}")
-        print("\n===== SOURCE RESOLUTION =====")
-        print(f"Requested: {source_hint}")
-        print(f"Resolved: {os.path.basename(canonical_source_id) if canonical_source_id else source_hint}")
-        print(f"Confidence: {analysis.get('source_confidence', 0.0)}")
-        print(f"Method: {'fuzzy_or_exact_token' if canonical_source_id else 'unresolved'}")
+        print(f"Intent: {plan.intent.value if plan else analysis.get('intent')}")
+        print(f"Scope: {plan.scope.value if plan else analysis.get('request_scope')}")
+        print(f"Modality: {plan.modality.value if plan else analysis.get('modality')}")
+        print(f"Source Hint: {plan.source_spec.source_hint if plan else analysis.get('source_hint')}")
+        print(f"Canonical Path: {plan.source_spec.canonical_path if plan else analysis.get('canonical_source_id')}")
 
-    # Check for Temporal Query Intent / File Listing / Metadata Inventory first
-    if temporal_intent != "none" or intent in ["TEMPORAL_FILE_QUERY", "FILE_LIST", "FILE_COUNT"]:
-        ans_str, sources, num_chunks = handle_temporal_query(question, analysis)
-        update_last_interaction(question, ans_str, sources, modality)
+    # Check for pending face registration flow first
+    pending_faces = get_pending_faces()
+    if pending_faces and (analysis.get("face_intent") == "face_registration" or any(p in question_lower for p in ["this is", "my mother", "her name", "his name"])):
+        user_label = question.strip()
+        for prefix in ["this is my ", "this is ", "her name is ", "his name is "]:
+            if question_lower.startswith(prefix):
+                user_label = question[len(prefix):].strip(" .!")
+                break
+
+        if not user_label:
+            user_label = "mother"
+
+        exact_pending_face = pending_faces[0]
+        reg_result = register_pending_face(exact_pending_face, user_label)
+        clear_pending_faces()
+
+        ans_str = f"Registered identity '{user_label}' in face memory."
+        sources = [os.path.basename(exact_pending_face.get("source_id", "image.jpg"))]
+        update_last_interaction(question, ans_str, sources, "image", identity_info={"registered_label": user_label})
+
         if return_structured:
-            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
-        return ans_str, sources, num_chunks
+            return {"answer": ans_str, "sources": sources, "num_chunks": 1, "type": "text", "images": []}
+        return ans_str, sources, 1
+
+    # Step 2: Dispatch QueryPlan to IntentRouter strategy handler
+    if plan:
+        return IntentRouter.dispatch(plan, question, analysis, return_structured=return_structured)
+
+    ans_str, sources, num_chunks = handle_temporal_query(question, analysis)
+    if return_structured:
+        return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
+    return ans_str, sources, num_chunks
+
 
     # Check for Deterministic Metadata Queries (No LLM call!)
     if intent in ["FILE_METADATA", "IMAGE_FILENAME_QUERY", "IMAGE_COUNT_QUERY", "IMAGE_FILENAME_QUERY", "image_filename_query", "image_count_query"]:
@@ -1017,7 +1020,7 @@ Response:"""
 
     # Step 5: System A Hard Source Candidate Retrieval
     if modality == "audio" and resolved_source_path and os.path.exists(resolved_source_path):
-        full_transcript, total_chunks = get_full_transcript_for_source(resolved_source_path)
+        full_transcript, total_chunks, _ = get_full_transcript_for_source(resolved_source_path)
         if full_transcript:
             src_name = os.path.basename(resolved_source_path)
             sources = [src_name]
@@ -1112,10 +1115,10 @@ Answer:"""
     )
 
     try:
-        raw_answer = ask_llama(prompt, system_instruction=grounded_sys_instruction)
+        raw_answer = ask_gemini(prompt)
     except Exception:
         try:
-            raw_answer = ask_gemini(prompt)
+            raw_answer = ask_llama(prompt, system_instruction=grounded_sys_instruction)
         except Exception as e:
             raw_answer = f"LLM Error: {str(e)}"
 
@@ -1167,10 +1170,10 @@ def summarize(question, context):
         "Do NOT invent missing facts, inventory, purchases, or accounting terms."
     )
     try:
-        return clean_llm_answer(ask_llama(prompt, system_instruction=grounded_sys_instruction))
+        return clean_llm_answer(ask_gemini(prompt))
     except Exception:
         try:
-            return clean_llm_answer(ask_gemini(prompt))
+            return clean_llm_answer(ask_llama(prompt, system_instruction=grounded_sys_instruction))
         except Exception as e:
             return f"LLM Error: {str(e)}"
 

@@ -48,7 +48,8 @@ def run_unit_quick():
     print("Dense entity tokens:", extract_entity_tokens("please list the name images which have named by dense."))
     assert analysis_dense.get("intent") == "IMAGE_FILENAME_QUERY", "FAILED: Expected IMAGE_FILENAME_QUERY!"
 
-    resp, matched_imgs, cnt = handle_metadata_query("please list the name images which have named by dense.", analysis_dense)
+    res_meta = handle_metadata_query("please list the name images which have named by dense.", analysis_dense)
+    matched_imgs = res_meta[1] if isinstance(res_meta, tuple) else []
     print("Matched dense images:", matched_imgs)
     assert set(matched_imgs) == {"dense.jpeg", "dense2.webp", "dense3.webp"}, f"FAILED: Expected exact dense images, got {matched_imgs}"
 
