@@ -51,6 +51,7 @@ class SourceSpec:
     canonical_path: Optional[str] = None
     is_explicit: bool = False
     is_resolved: bool = False
+    is_ambiguous: bool = False
     confidence: float = 0.0
 
     @property

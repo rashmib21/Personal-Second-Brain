@@ -49,6 +49,33 @@ class IntentRouter:
                 return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
             return unresolved_msg, [], 0
 
+        # Step 2: Incomplete / Ambiguous Source Clarification Guard
+        # If the request requires a source (e.g. summarization, full transcript, visual QA)
+        # but the query is incomplete or ambiguous, ask the user to clarify.
+        # Do NOT select an arbitrary file, most recent file, or fall back to global vector search!
+        if plan.source_spec.is_ambiguous or (
+            plan.intent in [QueryIntent.SUMMARIZATION, QueryIntent.FULL_CONTENT_FETCH, QueryIntent.VISUAL_QA]
+            and not plan.source_spec.is_resolved
+            and not plan.source_spec.is_explicit
+        ):
+            if plan.intent == QueryIntent.SUMMARIZATION:
+                clarification_msg = "Sure — which file would you like me to summarize?"
+            elif plan.intent == QueryIntent.FULL_CONTENT_FETCH:
+                clarification_msg = "Sure — which file's complete content would you like to view?"
+            elif plan.intent == QueryIntent.VISUAL_QA:
+                clarification_msg = "Sure — which image file are you referring to?"
+            else:
+                clarification_msg = "Sure — which file are you referring to?"
+
+            if DEBUG:
+                print(f"\n===== AMBIGUOUS SOURCE CLARIFICATION GUARD =====")
+                print(f"Query '{question}' lacks required source context. Requesting clarification.")
+
+            update_last_interaction(question, clarification_msg, [], plan.modality.value)
+            if return_structured:
+                return {"answer": clarification_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+            return clarification_msg, [], 0
+
         # Step 2: Route to designated Intent Strategy Handler based on QueryPlan.intent
         if plan.intent == QueryIntent.METADATA_QUERY:
             return IntentRouter._handle_metadata(plan, question, analysis, return_structured)

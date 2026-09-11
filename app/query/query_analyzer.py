@@ -456,6 +456,33 @@ def analyze_query(question, indexed_files=None):
     source_phrase_indicators = ["audio of", "in file", "the file", "image of", "recording of", "file", "audio", "image"]
     has_source_phrase = any(ind in question_lower for ind in source_phrase_indicators)
 
+    # Anaphora & Conversational Context Resolution for vague source references ("it", "this file", "the recording")
+    anaphora_indicators = [
+        r"\bit\b", r"\bthis\s+file\b", r"\bthat\s+file\b", r"\bthe\s+file\b",
+        r"\bthis\s+audio\b", r"\bthe\s+audio\b", r"\bthis\s+recording\b", r"\bthe\s+recording\b",
+        r"\bthis\s+document\b", r"\bthe\s+document\b", r"\bthis\s+image\b", r"\bthe\s+image\b",
+        r"\bthis\s+call\b", r"\bthe\s+call\b", r"\bthis\s+transcript\b", r"\bthe\s+transcript\b"
+    ]
+    has_anaphora = any(re.search(pat, question_lower) for pat in anaphora_indicators)
+
+    if source_hint is None and has_anaphora:
+        from app.services.interaction_state import get_last_interaction
+        last_state = get_last_interaction()
+        prev_src = last_state.get("previous_source") if last_state else None
+        if not prev_src and last_state and last_state.get("retrieved_sources"):
+            prev_src = last_state["retrieved_sources"][0]
+        
+        if prev_src:
+            for fname in indexed_files:
+                if fname.lower() == prev_src.lower():
+                    source_hint = fname
+                    source_confidence = 0.9
+                    break
+            if source_hint is None:
+                source_hint = prev_src
+                source_confidence = 0.8
+            canonical_source_id = resolve_canonical_source_id(source_hint)
+
     if source_hint is None and temporal_intent == "none":
         if has_source_phrase and len(entity_tokens) > 0:
             target_entity = entity_tokens[0]
@@ -464,6 +491,16 @@ def analyze_query(question, indexed_files=None):
             else:
                 source_hint = f"UNRESOLVED_SOURCE_{target_entity.upper()}"
             unresolved_explicit_source = True
+
+    # Incomplete / Ambiguous Source Detection
+    is_ambiguous_source = False
+    if source_hint is None and temporal_intent == "none":
+        incomplete_patterns = [
+            r"\b(?:of|in|about|from|for|on|with|to|the|this|that|a|an)\s*$",
+            r"\b(?:summarize|summarise|overview|synopsis|translate|read|describe|contents\s+of)\s+(?:the|this|that|a|an)\s*$"
+        ]
+        if any(re.search(pat, question_lower) for pat in incomplete_patterns) or (has_anaphora and not source_hint):
+            is_ambiguous_source = True
 
     # Update modality if source_hint has explicit file extension
     if source_hint and not str(source_hint).startswith("UNRESOLVED_"):
@@ -717,6 +754,7 @@ def analyze_query(question, indexed_files=None):
             canonical_path=canonical_source_id if resolved_file_exists else None,
             is_explicit=source_is_explicit,
             is_resolved=source_is_resolved,
+            is_ambiguous=is_ambiguous_source,
             confidence=source_confidence if resolved_file_exists else 0.0
         ),
         filters=QueryFilters(

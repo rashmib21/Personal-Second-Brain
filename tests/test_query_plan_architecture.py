@@ -58,7 +58,7 @@ def test_explicit_source_safety_unresolved():
     ans, sources, num_chunks = ask(query)
     assert len(sources) == 0
     assert num_chunks == 0
-    assert "couldn't reliably identify" in ans.lower() or "unresolved" in ans.lower()
+    assert "couldn't identify" in ans.lower() or "unresolved" in ans.lower()
 
 
 # ==============================================================================
@@ -133,3 +133,56 @@ def test_ambiguous_and_negative_queries():
 
     plan2 = build_query_plan("tell me something interesting")
     assert plan2.intent == QueryIntent.QUESTION_ANSWERING
+
+
+# ==============================================================================
+# TEST 7: Incomplete Query Clarification (No Arbitrary File Assumption)
+# ==============================================================================
+def test_7_incomplete_query_clarification():
+    """
+    Verifies that incomplete or ambiguous source queries ask for clarification
+    rather than selecting an arbitrary file or falling back to global vector search.
+    """
+    from app.services.interaction_state import clear_last_interaction
+    clear_last_interaction()
+
+    incomplete_queries = [
+        "give me a summary of the",
+        "summarize the",
+        "show me the contents of"
+    ]
+
+    for q in incomplete_queries:
+        plan = build_query_plan(q)
+        assert plan.source_spec.is_ambiguous or plan.source_spec.is_resolved == False
+        ans, sources, num_chunks = ask(q)
+        assert len(sources) == 0, f"Failed on '{q}': should return 0 sources, got {sources}"
+        assert num_chunks == 0
+        assert "which file" in ans.lower(), f"Failed on '{q}': expected clarification question, got '{ans}'"
+
+
+# ==============================================================================
+# TEST 8: Conversational Anaphora Resolution ("Summarize it")
+# ==============================================================================
+def test_8_conversational_anaphora_resolution():
+    """
+    Verifies that pronouns ('it', 'this file') resolve to the established conversational source context.
+    """
+    from app.services.interaction_state import update_last_interaction, clear_last_interaction
+    clear_last_interaction()
+
+    indexed_files = ["Accounts.m4a", "Behari_lal_call.m4a"]
+
+    # Establish conversation context
+    update_last_interaction(
+        query="What is Accounts.m4a?",
+        answer="Accounts.m4a is an audio recording.",
+        sources=["Accounts.m4a"],
+        modality="audio"
+    )
+
+    plan = build_query_plan("Summarize it.", indexed_files=indexed_files)
+    assert plan.source_spec.is_resolved == True
+    assert plan.source_spec.source_hint == "Accounts.m4a"
+    assert plan.intent == QueryIntent.SUMMARIZATION
+
