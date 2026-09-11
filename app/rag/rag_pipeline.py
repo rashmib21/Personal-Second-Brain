@@ -659,11 +659,36 @@ def ask(question, return_structured=False):
         return learning_answer, [correct_source], 1
 
     # Step 3: Handle Audio/Document Full Transcript & Translation Intent
-    if intent in ["AUDIO_TRANSCRIPT", "AUDIO_TRANSLATION", "transcript", "full_transcript"] and resolved_source_path and os.path.exists(resolved_source_path):
-        full_transcript, total_chunks = get_full_transcript_for_source(resolved_source_path)
-        if full_transcript:
-            src_name = os.path.basename(resolved_source_path)
+    if intent in ["AUDIO_TRANSCRIPT", "AUDIO_TRANSLATION", "transcript", "full_transcript"]:
+        if not resolved_source_path or not os.path.exists(resolved_source_path):
+            target_display = os.path.basename(source_hint) if source_hint else "requested"
+            unresolved_msg = f"I couldn't reliably identify the requested {target_display} file, so I won't use another file to answer this question."
+            update_last_interaction(question, unresolved_msg, [], modality)
+            if return_structured:
+                return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+            return unresolved_msg, [], 0
 
+        full_transcript, total_chunks, val_metrics = get_full_transcript_for_source(resolved_source_path)
+        src_name = os.path.basename(resolved_source_path)
+
+        if not val_metrics.get("is_complete", True) and val_metrics.get("missing_chunks", 0) > 0:
+            incomplete_msg = (
+                f"Source file '{src_name}' could not be fully reconstructed. "
+                f"Expected {val_metrics.get('expected_chunks', 0)} chunks, but fetched {val_metrics.get('fetched_chunks', 0)} chunks."
+            )
+            update_last_interaction(question, incomplete_msg, [src_name], modality)
+            if return_structured:
+                return {
+                    "answer": incomplete_msg,
+                    "sources": [src_name],
+                    "num_chunks": val_metrics.get("fetched_chunks", 0),
+                    "type": "text",
+                    "images": [],
+                    "validation_metrics": val_metrics
+                }
+            return incomplete_msg, [src_name], val_metrics.get("fetched_chunks", 0)
+
+        if full_transcript:
             if intent == "AUDIO_TRANSLATION" or target_language is not None:
                 target_lang_name = target_language if target_language else "English"
                 final_output, translated_batch_count = translate_full_transcript(
@@ -680,9 +705,11 @@ def ask(question, return_structured=False):
             if DEBUG:
                 print("\n===== FULL TRANSCRIPT PIPELINE METRICS =====")
                 print(f"Source: {src_name}")
-                print(f"expected_chunk_count: {total_chunks}")
-                print(f"retrieved_chunk_count: {total_chunks}")
-                print(f"reconstructed_chunk_count: {total_chunks}")
+                print(f"expected_chunk_count: {val_metrics.get('expected_chunks', total_chunks)}")
+                print(f"retrieved_chunk_count: {val_metrics.get('fetched_chunks', total_chunks)}")
+                print(f"missing_chunks: {val_metrics.get('missing_chunks', 0)}")
+                print(f"duplicate_chunks: {val_metrics.get('duplicate_chunks', 0)}")
+                print(f"reconstructed_chunk_count: {val_metrics.get('reconstructed_chunks', total_chunks)}")
                 print(f"translated_batch_count: {translated_batch_count}")
                 print(f"Intent: {intent}")
                 print(f"Target language: {target_language}")
@@ -697,7 +724,8 @@ def ask(question, return_structured=False):
                     "num_chunks": total_chunks,
                     "evidence": [{"source": src_name, "chunk_id": 1, "text": full_transcript}],
                     "type": "text",
-                    "images": []
+                    "images": [],
+                    "validation_metrics": val_metrics
                 }
             return final_output, [src_name], total_chunks
 

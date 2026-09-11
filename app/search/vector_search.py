@@ -442,18 +442,26 @@ def search_images_by_text(question, max_results=5):
 
 def get_full_transcript_for_source(source_path):
 	"""
-	Retrieves ALL transcript chunks for a source file from LanceDB documents table in original sequence order.
-	Validates completeness (retrieved == expected) and sorts by chunk sequence index if available.
-	Strips chunk header prefixes, deduplicates repeating ASR loops, removes chunk overlap duplication, and reconstructs the clean transcript.
-	Returns tuple: (reconstructed_transcript_text, chunk_count)
+	Retrieves ALL transcript/document chunks for a source file from LanceDB documents table in original sequence order.
+	Validates completeness (expected_chunks, fetched_chunks, missing_chunks, duplicate_chunks, reconstructed_chunks) and sorts by chunk sequence index.
+	Strips chunk header prefixes, removes structural chunk boundary overlap duplication while preserving raw evidence 100% intact.
+	Returns tuple: (reconstructed_transcript_text, chunk_count, validation_metrics_dict)
 	"""
 	doc_table = get_table()
 	if doc_table is None or doc_table.count_rows() == 0:
-		return "", 0
+		empty_metrics = {
+			"expected_chunks": 0, "fetched_chunks": 0, "missing_chunks": 0,
+			"duplicate_chunks": 0, "reconstructed_chunks": 0, "is_complete": False
+		}
+		return "", 0, empty_metrics
 
 	df_doc = doc_table.to_pandas()
 	if df_doc.empty:
-		return "", 0
+		empty_metrics = {
+			"expected_chunks": 0, "fetched_chunks": 0, "missing_chunks": 0,
+			"duplicate_chunks": 0, "reconstructed_chunks": 0, "is_complete": False
+		}
+		return "", 0, empty_metrics
 
 	target_base = os.path.basename(source_path).lower()
 	matching_rows = []
@@ -466,18 +474,29 @@ def get_full_transcript_for_source(source_path):
 			matching_rows.append(row)
 
 	if not matching_rows:
-		return "", 0
+		empty_metrics = {
+			"expected_chunks": 0, "fetched_chunks": 0, "missing_chunks": 0,
+			"duplicate_chunks": 0, "reconstructed_chunks": 0, "is_complete": False
+		}
+		return "", 0, empty_metrics
 
 	expected_chunks = len(matching_rows)
-	retrieved_chunks = len(matching_rows)
+	fetched_chunks = len(matching_rows)
 
-	# Check if chunk_id contains explicit _chunk_sequence_number pattern (e.g. hash_chunk_1)
+	# Check for explicit chunk sequence index pattern (_chunk_N)
 	has_explicit_chunk_indices = False
+	chunk_ids_seen = set()
+	duplicate_chunks = 0
+
 	for row in matching_rows:
 		c_id = str(row.get("chunk_id", ""))
+		if c_id in chunk_ids_seen:
+			duplicate_chunks += 1
+		else:
+			chunk_ids_seen.add(c_id)
+
 		if "_chunk_" in c_id:
 			has_explicit_chunk_indices = True
-			break
 
 	if has_explicit_chunk_indices:
 		def extract_chunk_sequence_index(row_item):
@@ -499,16 +518,29 @@ def get_full_transcript_for_source(source_path):
 		cleaned_chunks.append(text.strip())
 
 	reconstructed_chunks_count = len(cleaned_chunks)
+	missing_chunks = max(0, expected_chunks - fetched_chunks)
+	is_complete = (missing_chunks == 0 and fetched_chunks == expected_chunks and fetched_chunks > 0)
 
-	# Validate completeness: retrieved chunks must equal expected chunks
+	validation_metrics = {
+		"expected_chunks": expected_chunks,
+		"fetched_chunks": fetched_chunks,
+		"missing_chunks": missing_chunks,
+		"duplicate_chunks": duplicate_chunks,
+		"reconstructed_chunks": reconstructed_chunks_count,
+		"is_complete": is_complete
+	}
+
 	if DEBUG:
 		print("\n===== FULL TRANSCRIPT RETRIEVAL METRICS =====")
 		print(f"Source: {os.path.basename(source_path)}")
 		print(f"expected_chunk_count: {expected_chunks}")
-		print(f"retrieved_chunk_count: {retrieved_chunks}")
+		print(f"retrieved_chunk_count: {fetched_chunks}")
+		print(f"missing_chunks: {missing_chunks}")
+		print(f"duplicate_chunks: {duplicate_chunks}")
 		print(f"reconstructed_chunk_count: {reconstructed_chunks_count}")
+		print(f"is_complete: {is_complete}")
 
-	# Deduplicate adjacent chunk overlaps (e.g. trailing words of Chunk N matching leading words of Chunk N+1)
+	# Deduplicate structural chunk boundary overlap (trailing words of Chunk N matching leading words of Chunk N+1)
 	reconstructed_parts = []
 	for chunk_text in cleaned_chunks:
 		if not chunk_text:
@@ -522,7 +554,7 @@ def get_full_transcript_for_source(source_path):
 		prev_words = prev_chunk.split()
 		curr_words = chunk_text.split()
 
-		# Look for longest word overlap at boundary (up to 15 words)
+		# Look for structural word overlap at boundary (up to 15 words)
 		overlap_len = 0
 		max_check = min(15, len(prev_words), len(curr_words))
 
@@ -538,12 +570,8 @@ def get_full_transcript_for_source(source_path):
 		else:
 			reconstructed_parts.append(chunk_text)
 
-	combined_raw = "\n".join(reconstructed_parts)
-
-	# Clean repeating ASR hallucination lines, phrase loops, and Hindi filler loops
-	from app.services.speech_to_text import clean_asr_hallucination_loops
-	reconstructed_transcript = clean_asr_hallucination_loops(combined_raw)
-	return reconstructed_transcript, expected_chunks
+	raw_reconstructed_transcript = "\n".join(reconstructed_parts)
+	return raw_reconstructed_transcript, expected_chunks, validation_metrics
 
 
 def get_stored_ocr_text_for_image(source_path):

@@ -467,11 +467,16 @@ def analyze_query(question, indexed_files=None):
 
     # Generic detection for full-source transcript and full-source translation requests
     full_source_patterns = [
-        r"\ball\s+the\s+text\b", r"\ball\s+text\b", r"\bcomplete\s+transcript\b",
+        r"\ball\s+(?:the\s+)?text\b", r"\bcomplete\s+(?:the\s+)?transcript\b",
         r"\bentire\s+transcript\b", r"\bfull\s+transcript\b", r"\bentire\s+audio\b",
         r"\ball\s+of\s+the\s+audio\b", r"\bcomplete\s+audio\b", r"\bfull\s+content\b",
         r"\bcomplete\s+content\b", r"\beverything\s+said\b", r"\beverything\s+in\b",
-        r"\bwhole\s+text\b", r"\bwhole\s+transcript\b", r"\bconvert\s+all\b", r"\btranslate\s+all\b"
+        r"\bwhole\s+text\b", r"\bwhole\s+transcript\b", r"\bconvert\s+all\b", r"\btranslate\s+all\b",
+        r"\btranslate\s+(?:the\s+)?entire\b", r"\bconvert\s+(?:the\s+)?entire\b",
+        r"\btranslate\s+(?:the\s+)?whole\b", r"\bconvert\s+(?:the\s+)?whole\b",
+        r"\btranslate\s+everything\b", r"\bconvert\s+everything\b",
+        r"\bcomplete\s+english\s+version\b", r"\bfull\s+english\s+version\b",
+        r"\bcomplete\s+translation\b", r"\bfull\s+translation\b"
     ]
     is_full_source_request = any(re.search(pattern_string, question_lower) for pattern_string in full_source_patterns)
 
@@ -487,7 +492,7 @@ def analyze_query(question, indexed_files=None):
     is_full_translation_request = False
     if is_full_source_request and (is_translation_action or target_language is not None):
         is_full_translation_request = True
-    elif is_translation_action and target_language is not None and (modality == "audio" or source_hint is not None):
+    elif is_translation_action and target_language is not None and (modality in ["audio", "document"] or source_hint is not None):
         is_full_translation_request = True
 
     audio_summary_phrases = [
@@ -534,7 +539,7 @@ def analyze_query(question, indexed_files=None):
         "intent": intent,
         "temporal_intent": temporal_intent,
         "face_intent": "none",
-        "is_visual_qa": is_image_summary_query or is_ocr_query,
+        "is_visual_qa": (modality == "image") or is_image_summary_query or is_ocr_query,
         "is_ocr_query": is_ocr_query,
         "is_image_summary_query": is_image_summary_query,
         "modality": modality,

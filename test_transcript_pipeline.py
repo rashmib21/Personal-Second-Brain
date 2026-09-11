@@ -96,8 +96,42 @@ def run_tests():
     assert res9.get("intent") == INTENT_TEXT_SEARCH, f"Expected {INTENT_TEXT_SEARCH}, got {res9.get('intent')}"
     print("  PASS: Specific QA query routes to INTENT_TEXT_SEARCH")
 
+    # 10. Test Document File Complete Translation
+    q10 = "convert all text of project_report.pdf into English"
+    res10 = analyze_query(q10)
+    print(f"\nTest 10 (Document File Complete Translation): '{q10}'")
+    print(f"  Detected Intent: {res10.get('intent')}")
+    print(f"  Target Language: {res10.get('target_language')}")
+    assert res10.get("intent") == INTENT_AUDIO_TRANSLATION, f"Expected {INTENT_AUDIO_TRANSLATION}, got {res10.get('intent')}"
+    assert res10.get("target_language") == "english", f"Expected 'english', got {res10.get('target_language')}"
+    print("  PASS: Document complete translation classified correctly as INTENT_AUDIO_TRANSLATION")
+
+    # 11. Test Unresolved Explicit Source Zero Fallback
+    from app.rag.rag_pipeline import ask
+    q11 = "convert all text of non_existent_file.m4a in english"
+    ans11, sources11, num_chunks11 = ask(q11)
+    print(f"\nTest 11 (Unresolved Explicit Source Zero Fallback): '{q11}'")
+    print(f"  Response Answer: {ans11}")
+    print(f"  Retrieved Sources: {sources11}")
+    assert "couldn't reliably identify" in ans11.lower() or "won't use another file" in ans11.lower(), "Expected zero-fallback warning message"
+    assert len(sources11) == 0, f"Expected 0 fallback sources, got {sources11}"
+    print("  PASS: Unresolved explicit source flagged correctly and 0 fallback sources returned")
+
+    # 12. Test Full Transcript Validation Metrics Audit
+    raw_text, total_c, metrics = get_full_transcript_for_source("Behari_lal_call.m4a")
+    print(f"\nTest 12 (Full Transcript Completeness Validation Audit):")
+    print(f"  Expected Chunks: {metrics.get('expected_chunks')}")
+    print(f"  Fetched Chunks: {metrics.get('fetched_chunks')}")
+    print(f"  Missing Chunks: {metrics.get('missing_chunks')}")
+    print(f"  Duplicate Chunks: {metrics.get('duplicate_chunks')}")
+    print(f"  Reconstructed Chunks: {metrics.get('reconstructed_chunks')}")
+    print(f"  Is Complete: {metrics.get('is_complete')}")
+    assert "expected_chunks" in metrics, "Expected metrics dict to contain 'expected_chunks'"
+    assert "is_complete" in metrics, "Expected metrics dict to contain 'is_complete'"
+    print("  PASS: Full transcript retrieval returns complete validation metrics audit")
+
     print("\n" + "=" * 60)
-    print("ALL 9 TRANSLATION PIPELINE REGRESSION TESTS PASSED SUCCESSFULLY!")
+    print("ALL 12 TRANSLATION PIPELINE REGRESSION TESTS PASSED SUCCESSFULLY!")
     print("=" * 60)
 
 if __name__ == "__main__":

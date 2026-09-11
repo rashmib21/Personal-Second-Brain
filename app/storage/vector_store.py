@@ -16,4 +16,7 @@ schema=pa.schema([
 		schema=schema,
 	)
 
-print(table)
+from config import DEBUG
+
+if DEBUG:
+	print(table)
