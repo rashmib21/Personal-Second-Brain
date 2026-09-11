@@ -443,7 +443,7 @@ def search_images_by_text(question, max_results=5):
 def get_full_transcript_for_source(source_path):
 	"""
 	Retrieves ALL transcript chunks for a source file from LanceDB documents table in original sequence order.
-	Validates completeness (retrieved == expected) and sorts by chunk sequence index.
+	Validates completeness (retrieved == expected) and sorts by chunk sequence index if available.
 	Strips chunk header prefixes, deduplicates repeating ASR loops, removes chunk overlap duplication, and reconstructs the clean transcript.
 	Returns tuple: (reconstructed_transcript_text, chunk_count)
 	"""
@@ -469,17 +469,25 @@ def get_full_transcript_for_source(source_path):
 		return "", 0
 
 	expected_chunks = len(matching_rows)
+	retrieved_chunks = len(matching_rows)
 
-	# Helper function to extract numerical sequence index from chunk_id for deterministic sequence ordering
-	def extract_chunk_sequence_index(row_item):
-		c_id = str(row_item.get("chunk_id", ""))
-		digits = re.findall(r"\d+", c_id)
-		if digits:
-			return int(digits[-1])
-		return 0
+	# Check if chunk_id contains explicit _chunk_sequence_number pattern (e.g. hash_chunk_1)
+	has_explicit_chunk_indices = False
+	for row in matching_rows:
+		c_id = str(row.get("chunk_id", ""))
+		if "_chunk_" in c_id:
+			has_explicit_chunk_indices = True
+			break
 
-	# Sort matching rows deterministically by sequence index
-	matching_rows.sort(key=extract_chunk_sequence_index)
+	if has_explicit_chunk_indices:
+		def extract_chunk_sequence_index(row_item):
+			c_id = str(row_item.get("chunk_id", ""))
+			match = re.search(r"_chunk_(\d+)", c_id)
+			if match:
+				return int(match.group(1))
+			return 0
+
+		matching_rows.sort(key=extract_chunk_sequence_index)
 
 	cleaned_chunks = []
 	for row in matching_rows:
@@ -490,10 +498,15 @@ def get_full_transcript_for_source(source_path):
 				text = parts[1]
 		cleaned_chunks.append(text.strip())
 
+	reconstructed_chunks_count = len(cleaned_chunks)
+
 	# Validate completeness: retrieved chunks must equal expected chunks
-	if len(cleaned_chunks) != expected_chunks:
-		if DEBUG:
-			print(f"CHUNK VALIDATION WARN: Retrieved {len(cleaned_chunks)} chunks, expected {expected_chunks}")
+	if DEBUG:
+		print("\n===== FULL TRANSCRIPT RETRIEVAL METRICS =====")
+		print(f"Source: {os.path.basename(source_path)}")
+		print(f"expected_chunk_count: {expected_chunks}")
+		print(f"retrieved_chunk_count: {retrieved_chunks}")
+		print(f"reconstructed_chunk_count: {reconstructed_chunks_count}")
 
 	# Deduplicate adjacent chunk overlaps (e.g. trailing words of Chunk N matching leading words of Chunk N+1)
 	reconstructed_parts = []

@@ -144,9 +144,9 @@ def route_file(self, event):
 
         logger.info(f"Created {len(chunks)} chunks for {filename}")
 
-        # Generate vector embeddings and save to LanceDB
-        for chunk in chunks:
-            chunk_id = str(uuid.uuid4())
+        # Generate vector embeddings and save to LanceDB with explicit sequence indices
+        for chunk_idx, chunk in enumerate(chunks, 1):
+            chunk_id = f"{file_hash}_chunk_{chunk_idx}"
             embedding = generate_embedding(file_type, chunk)
 
             store_chunk(

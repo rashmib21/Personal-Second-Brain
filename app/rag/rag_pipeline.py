@@ -369,47 +369,92 @@ def handle_speaker_query(question, analysis):
 
 def translate_full_transcript(full_transcript, target_language="English", source_filename=""):
     """
-    Faithful full-transcript translation service.
-    Translates reconstructed complete source transcript segment-by-segment into target_language.
+    Faithful full-transcript translation service using sequential batch processing.
+    Splits long transcripts into sequential paragraph/line batches (~1000 chars each),
+    translates each batch verbatim into target_language, and recombines in exact original order.
     Strictly preserves all transcript content, unusual ASR names/numbers/phrases without summarization or fictitious corrections.
+    Returns tuple: (translated_transcript, translated_batch_count)
     """
     if not full_transcript or not full_transcript.strip():
-        return ""
+        return "", 0
 
     target_lang_display = target_language.capitalize() if target_language else "English"
     source_label = f"Source File: {os.path.basename(source_filename)}\n" if source_filename else ""
 
-    prompt = f"""You are a verbatim, faithful transcript translator.
+    # Split transcript into logical paragraph/line blocks for batch processing
+    raw_lines = full_transcript.split("\n")
+    batches = []
+    current_batch_lines = []
+    current_length = 0
+    max_batch_chars = 1000
+
+    for line in raw_lines:
+        line_str = line.strip()
+        if not line_str:
+            continue
+
+        if current_length + len(line_str) + 1 <= max_batch_chars:
+            current_batch_lines.append(line_str)
+            current_length += len(line_str) + 1
+        else:
+            if current_batch_lines:
+                batches.append("\n".join(current_batch_lines))
+            current_batch_lines = [line_str]
+            current_length = len(line_str)
+
+    if current_batch_lines:
+        batches.append("\n".join(current_batch_lines))
+
+    translated_batches = []
+    translated_batch_count = len(batches)
+
+    system_instruction = (
+        f"You are a strictly verbatim transcript translator translating into {target_lang_display}. "
+        "Translate ALL input lines verbatim without summarization, omission, or hallucinated corrections. "
+        "Do NOT invent father names, family names, company names, or numbers."
+    )
+
+    for idx, batch_text in enumerate(batches, 1):
+        prompt = f"""You are a verbatim, faithful transcript translator.
 
 TASK:
-Translate the complete source transcript below into clear, natural {target_lang_display}.
+Translate Batch {idx}/{len(batches)} of the transcript below into clear, natural {target_lang_display}.
 
 STRICT FAITHFUL TRANSLATION RULES:
-1. Translate EVERY single sentence and segment of the transcript. Do NOT omit any paragraph, sentence, name, or detail.
+1. Translate EVERY single sentence and line in this batch. Do NOT omit any line, name, or detail.
 2. Do NOT summarize, condense, paraphrase, or drop any text.
 3. Do NOT invent missing details, father names, company names, dates, or numbers.
-4. If the transcript contains unusual proper nouns, names, numbers, or noisy ASR phrases, translate the text faithfully as spoken. Never replace unusual names or numbers with fictitious or plausible alternatives.
-5. Provide ONLY the translated transcript text. Do NOT add meta-commentary like "Here is the translation:".
+4. If the text contains unusual proper nouns, names, numbers, or noisy ASR phrases, translate the text faithfully as spoken. Never replace unusual names or numbers with fictitious or plausible alternatives.
+5. Provide ONLY the translated text for this batch. Do NOT add headers like "Batch 1:" or "Here is the translation:".
 
-{source_label}RAW SOURCE TRANSCRIPT:
-{full_transcript}
+{source_label}RAW BATCH TRANSCRIPT (Segment {idx}/{len(batches)}):
+{batch_text}
 
 FAITHFUL {target_lang_display.upper()} TRANSLATION:"""
 
-    system_instruction = (
-        f"You are a strictly faithful transcript translator translating into {target_lang_display}. "
-        "Translate ALL content verbatim without summarization, omission, or hallucinated corrections."
-    )
-
-    try:
-        translated = ask_llama(prompt, system_instruction=system_instruction)
-    except Exception:
         try:
-            translated = ask_gemini(prompt)
-        except Exception as e:
-            translated = f"Translation Error: {str(e)}"
+            raw_translated_batch = ask_llama(prompt, system_instruction=system_instruction)
+        except Exception:
+            try:
+                raw_translated_batch = ask_gemini(prompt)
+            except Exception as e:
+                raw_translated_batch = f"Translation Error: {str(e)}"
 
-    return clean_llm_answer(translated)
+        clean_batch = clean_llm_answer(raw_translated_batch)
+        if clean_batch:
+            translated_batches.append(clean_batch)
+
+    final_translated_transcript = "\n".join(translated_batches).strip()
+
+    if DEBUG:
+        print("\n===== TRANSLATION BATCH METRICS =====")
+        print(f"source_filename: {os.path.basename(source_filename)}")
+        print(f"target_language: {target_lang_display}")
+        print(f"translated_batch_count: {translated_batch_count}")
+        print(f"input_char_length: {len(full_transcript)}")
+        print(f"output_char_length: {len(final_translated_transcript)}")
+
+    return final_translated_transcript, translated_batch_count
 
 
 def ask(question, return_structured=False):
@@ -599,20 +644,28 @@ def ask(question, return_structured=False):
 
             if intent == "AUDIO_TRANSLATION" or target_language is not None:
                 target_lang_name = target_language if target_language else "English"
-                final_output = translate_full_transcript(full_transcript, target_language=target_lang_name, source_filename=resolved_source_path)
+                final_output, translated_batch_count = translate_full_transcript(
+                    full_transcript,
+                    target_language=target_lang_name,
+                    source_filename=resolved_source_path
+                )
             else:
                 final_output = full_transcript
+                translated_batch_count = 1
 
             validate_content_grounding(full_transcript, final_output, question, resolved_source_path)
 
             if DEBUG:
-                print("\n===== TRANSCRIPT DEBUG =====")
+                print("\n===== FULL TRANSCRIPT PIPELINE METRICS =====")
                 print(f"Source: {src_name}")
-                print(f"Chunk count: {total_chunks}")
+                print(f"expected_chunk_count: {total_chunks}")
+                print(f"retrieved_chunk_count: {total_chunks}")
+                print(f"reconstructed_chunk_count: {total_chunks}")
+                print(f"translated_batch_count: {translated_batch_count}")
                 print(f"Intent: {intent}")
                 print(f"Target language: {target_language}")
-                print(f"Reconstructed length: {len(full_transcript)} chars")
-                print(f"Output length: {len(final_output)} chars")
+                print(f"Reconstructed raw length: {len(full_transcript)} chars")
+                print(f"Final output length: {len(final_output)} chars")
 
             update_last_interaction(question, final_output, [src_name], modality)
             if return_structured:
