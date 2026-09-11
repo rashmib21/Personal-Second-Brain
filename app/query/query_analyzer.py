@@ -34,7 +34,9 @@ GENERIC_MEDIA_TERMS = {
     "audio", "image", "images", "video", "picture", "photo", "recording", "recordings",
     "sound", "file", "files", "document", "documents", "pdf", "docx", "xlsx", "mp3",
     "m4a", "wav", "mpeg", "txt", "excel", "list", "name", "names", "page", "pages",
-    "transcript", "transcripts", "content", "contents", "summary", "summaries"
+    "transcript", "transcripts", "content", "contents", "summary", "summaries",
+    "note", "notes", "doc", "docs", "paper", "papers", "sheet", "sheets", "call", "calls",
+    "text", "texts", "log", "logs"
 }
 
 STOP_WORDS_SET = {
@@ -259,6 +261,125 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
     return None, 0.0
 
 
+def resolve_semantic_source(question_lower, indexed_files, query_modality="all"):
+    """
+    Performs Semantic Source Resolution BEFORE content retrieval and intent routing.
+    Queries indexed chunks in documents and image_documents tables using BM25 and CrossEncoder reranking,
+    aggregates chunk similarity scores per candidate source file, and evaluates confidence/margin thresholds.
+
+    Returns tuple: (resolved_source, top_score, second_score, candidate_list)
+      - resolved_source: str or None (basename of resolved source file)
+      - top_score: float (top file aggregated score)
+      - second_score: float (runner-up file aggregated score)
+      - candidate_list: list of str (candidate basenames when ambiguous)
+    """
+    if not indexed_files:
+        return None, 0.0, 0.0, []
+
+    try:
+        from app.storage.lancedb_store import get_table, get_image_table
+        from app.search.vector_search import is_noise_chunk, rerank, get_words
+        from rank_bm25 import BM25Okapi
+        import math
+
+        doc_table = get_table()
+        image_table = get_image_table()
+
+        all_indexed_rows = []
+
+        if doc_table is not None and doc_table.count_rows() > 0:
+            df_doc = doc_table.to_pandas()
+            for i in range(len(df_doc)):
+                r = df_doc.iloc[i]
+                all_indexed_rows.append({
+                    "chunk_id": str(r.get("chunk_id", f"doc_{i}")),
+                    "path": str(r.get("path", "")),
+                    "file_type": str(r.get("file_type", "document")),
+                    "text": str(r.get("text", ""))
+                })
+
+        if image_table is not None and image_table.count_rows() > 0:
+            df_img = image_table.to_pandas()
+            for i in range(len(df_img)):
+                r = df_img.iloc[i]
+                all_indexed_rows.append({
+                    "chunk_id": str(r.get("chunk_id", f"img_{i}")),
+                    "path": str(r.get("path", "")),
+                    "file_type": "image",
+                    "text": str(r.get("text", ""))
+                })
+
+        if not all_indexed_rows:
+            return None, 0.0, 0.0, []
+
+        image_extensions = (".jpg", ".jpeg", ".png", ".webp")
+        audio_extensions = (".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac")
+
+        filtered_rows = []
+        for row in all_indexed_rows:
+            r_base = os.path.basename(row["path"]).lower()
+            if is_noise_chunk(row["text"]):
+                continue
+            if query_modality == "image":
+                if r_base.endswith(image_extensions):
+                    filtered_rows.append(row)
+            elif query_modality == "audio":
+                if r_base.endswith(audio_extensions):
+                    filtered_rows.append(row)
+            else:
+                filtered_rows.append(row)
+
+        if not filtered_rows:
+            filtered_rows = all_indexed_rows
+
+        tokenized_corpus = [get_words(r["text"]) for r in filtered_rows]
+        if not any(tokenized_corpus):
+            return None, 0.0, 0.0, []
+
+        query_tokens = get_words(question_lower)
+        if not query_tokens:
+            return None, 0.0, 0.0, []
+
+        bm25 = BM25Okapi(tokenized_corpus)
+        bm25_scores = bm25.get_scores(query_tokens)
+
+        top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:15]
+        candidate_chunks = [filtered_rows[i] for i in top_indices if bm25_scores[i] > 0]
+
+        if not candidate_chunks:
+            return None, 0.0, 0.0, []
+
+        scored_chunks = rerank(question_lower, candidate_chunks)
+
+        file_scores = {}
+        for chunk, score in scored_chunks:
+            file_base = os.path.basename(chunk["path"])
+            norm_score = 1.0 / (1.0 + math.exp(-score))
+            if file_base not in file_scores:
+                file_scores[file_base] = []
+            file_scores[file_base].append(norm_score)
+
+        if not file_scores:
+            return None, 0.0, 0.0, []
+
+        aggregated_scores = []
+        for f_base, scores in file_scores.items():
+            top_c_score = max(scores)
+            avg_c_score = sum(scores) / len(scores)
+            final_file_score = 0.7 * top_c_score + 0.3 * avg_c_score
+            aggregated_scores.append((f_base, final_file_score))
+
+        aggregated_scores.sort(key=lambda item: item[1], reverse=True)
+
+        top_file, top_score = aggregated_scores[0]
+        second_score = aggregated_scores[1][1] if len(aggregated_scores) > 1 else 0.0
+        candidates = [f[0] for f in aggregated_scores if f[1] >= 0.45]
+
+        return top_file, top_score, second_score, candidates
+    except Exception as err:
+        return None, 0.0, 0.0, []
+
+
 def resolve_canonical_source_id(source_hint):
     """
     Resolves a source_hint filename string to the canonical full filepath in LanceDB index or filesystem.
@@ -430,6 +551,7 @@ def analyze_query(question, indexed_files=None):
     source_hint = None
     source_confidence = 0.0
     unresolved_explicit_source = False
+    is_ambiguous_source = False
 
     if temporal_intent == "none":
         # Check explicit file extensions
@@ -453,7 +575,12 @@ def analyze_query(question, indexed_files=None):
 
     # Detect if query has explicit source/entity reference that failed resolution
     entity_tokens = extract_entity_tokens(question_lower)
-    source_phrase_indicators = ["audio of", "in file", "the file", "image of", "recording of", "file", "audio", "image"]
+    source_phrase_indicators = [
+        "audio of", "in file", "the file", "image of", "recording of", "file", "audio", "image",
+        "notes of", "the notes", "notes", "note", "document of", "the document", "document", "doc", "docs",
+        "paper of", "the paper", "paper", "sheet of", "the sheet", "sheet", "summary of", "overview of",
+        "contents of", "transcript of", "summarize", "summarise", "summary", "overview", "translate"
+    ]
     has_source_phrase = any(ind in question_lower for ind in source_phrase_indicators)
 
     # Anaphora & Conversational Context Resolution for vague source references ("it", "this file", "the recording")
@@ -483,7 +610,17 @@ def analyze_query(question, indexed_files=None):
                 source_confidence = 0.8
             canonical_source_id = resolve_canonical_source_id(source_hint)
 
-    if source_hint is None and temporal_intent == "none":
+    ambiguous_candidate_sources = []
+    if source_hint is None and not has_anaphora and temporal_intent == "none":
+        top_src, top_score, second_score, candidate_list = resolve_semantic_source(question_lower, indexed_files, query_modality=modality)
+        if top_src and top_score >= 0.55 and (top_score - second_score) >= 0.12:
+            source_hint = top_src
+            source_confidence = top_score
+        elif top_src and top_score >= 0.45 and (top_score - second_score) < 0.12 and len(candidate_list) > 1:
+            is_ambiguous_source = True
+            ambiguous_candidate_sources = candidate_list
+
+    if source_hint is None and temporal_intent == "none" and not is_ambiguous_source:
         if has_source_phrase and len(entity_tokens) > 0:
             target_entity = entity_tokens[0]
             if modality == "audio" or "audio" in question_lower:
@@ -493,7 +630,6 @@ def analyze_query(question, indexed_files=None):
             unresolved_explicit_source = True
 
     # Incomplete / Ambiguous Source Detection
-    is_ambiguous_source = False
     if source_hint is None and temporal_intent == "none":
         incomplete_patterns = [
             r"\b(?:of|in|about|from|for|on|with|to|the|this|that|a|an)\s*$",
@@ -755,7 +891,8 @@ def analyze_query(question, indexed_files=None):
             is_explicit=source_is_explicit,
             is_resolved=source_is_resolved,
             is_ambiguous=is_ambiguous_source,
-            confidence=source_confidence if resolved_file_exists else 0.0
+            confidence=source_confidence if resolved_file_exists else 0.0,
+            candidate_sources=ambiguous_candidate_sources
         ),
         filters=QueryFilters(
             start_datetime=start_dt,

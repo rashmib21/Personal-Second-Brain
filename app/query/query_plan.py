@@ -53,6 +53,7 @@ class SourceSpec:
     is_resolved: bool = False
     is_ambiguous: bool = False
     confidence: float = 0.0
+    candidate_sources: List[str] = field(default_factory=list)
 
     @property
     def filename(self) -> Optional[str]:
@@ -110,6 +111,7 @@ class QueryPlan:
             "canonical_source_id": self.source_spec.canonical_path,
             "unresolved_explicit_source": self.source_spec.is_explicit and not self.source_spec.is_resolved,
             "source_confidence": self.source_spec.confidence,
+            "candidate_sources": self.source_spec.candidate_sources,
             "target_language": self.filters.target_language,
             "is_correction": self.is_correction,
             "start_datetime": self.filters.start_datetime,

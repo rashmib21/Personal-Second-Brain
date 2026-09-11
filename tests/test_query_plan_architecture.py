@@ -186,3 +186,34 @@ def test_8_conversational_anaphora_resolution():
     assert plan.source_spec.source_hint == "Accounts.m4a"
     assert plan.intent == QueryIntent.SUMMARIZATION
 
+
+# ==============================================================================
+# TEST 9: Unresolved Document / Notes Source Target Safety
+# ==============================================================================
+def test_9_unresolved_document_notes_source():
+    """
+    Verifies that requests targeting document/notes entity phrases (e.g. 'SQl notes', 'chemistry paper')
+    do NOT match unrelated files containing 'notes' (e.g. quantum_notes.txt), and strictly report
+    unresolved explicit sources without falling back to global vector search.
+    """
+    indexed_files = ["quantum_notes.txt", "dense1.jpg", "Behari_lal_call.m4a"]
+
+    # Reproduction case & variations
+    target_queries = [
+        "i want you to summarize the SQl notes",
+        "give me overview of chemistry paper",
+        "summarize python sheet"
+    ]
+
+    for q in target_queries:
+        plan = build_query_plan(q, indexed_files=indexed_files)
+        assert plan.source_spec.is_explicit == True, f"Failed on '{q}': is_explicit should be True"
+        assert plan.source_spec.is_resolved == False, f"Failed on '{q}': is_resolved should be False"
+        assert plan.source_spec.source_hint != "quantum_notes.txt", f"Failed on '{q}': bound falsely to quantum_notes.txt"
+
+        ans, sources, num_chunks = ask(q)
+        assert len(sources) == 0, f"Failed on '{q}': expected 0 sources, got {sources}"
+        assert num_chunks == 0, f"Failed on '{q}': expected 0 chunks, got {num_chunks}"
+        assert "couldn't identify" in ans.lower() or "could not find" in ans.lower() or "specify" in ans.lower() or "clarify" in ans.lower(), f"Unexpected answer: {ans}"
+
+
