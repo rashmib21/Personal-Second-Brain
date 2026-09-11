@@ -75,3 +75,38 @@ def test_4_unresolved_natural_description_safety():
     ans, sources, num_chunks = ask(q)
     assert len(sources) == 0, f"Expected 0 sources, got {sources}"
     assert num_chunks == 0
+
+
+def test_5_camel_case_filename_resolution():
+    """
+    Verifies that 'i want you to summarize the SQL notes', 'summarize SQL Notes',
+    and 'summarize the SQLNotesForProfessionals' all resolve to SQLNotesForProfessionals.pdf.
+    """
+    indexed_files = ["SQLNotesForProfessionals.pdf", "quantum_notes.txt", "Behari_lal_call.m4a"]
+    queries = [
+        "i want you to summarize the SQL notes",
+        "summarize SQL Notes",
+        "summarize the SQLNotesForProfessionals"
+    ]
+
+    for q in queries:
+        plan = build_query_plan(q, indexed_files=indexed_files)
+        assert plan.source_spec.is_resolved == True, f"Failed on '{q}': is_resolved should be True"
+        assert plan.source_spec.source_hint == "SQLNotesForProfessionals.pdf", f"Failed on '{q}': expected SQLNotesForProfessionals.pdf, got {plan.source_spec.source_hint}"
+
+
+def test_6_unseen_camel_case_resolution():
+    """
+    Verifies that unseen CamelCase filenames like PythonCheatSheet.pdf resolve for natural phrasings
+    like 'explain the python cheat sheet'.
+    """
+    indexed_files = ["PythonCheatSheet.pdf", "FinancialReport2024.docx", "quantum_notes.txt"]
+
+    plan1 = build_query_plan("explain the python cheat sheet", indexed_files=indexed_files)
+    assert plan1.source_spec.is_resolved == True
+    assert plan1.source_spec.source_hint == "PythonCheatSheet.pdf"
+
+    plan2 = build_query_plan("overview of financial report", indexed_files=indexed_files)
+    assert plan2.source_spec.is_resolved == True
+    assert plan2.source_spec.source_hint == "FinancialReport2024.docx"
+

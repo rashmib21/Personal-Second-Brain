@@ -80,17 +80,34 @@ def get_indexed_filenames():
     return filenames_list
 
 
+def split_camel_case(text_input):
+    """
+    Splits CamelCase, PascalCase, and Acronym-word transitions in filenames and queries.
+    Example: 'SQLNotesForProfessionals' -> 'SQL Notes For Professionals'
+             'PythonCheatSheet' -> 'Python Cheat Sheet'
+    """
+    if not text_input:
+        return ""
+    s1 = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', str(text_input))
+    s2 = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', s1)
+    return s2
+
+
 def normalize_string(text_input):
     """
-    Normalizes text by lowercasing, NFKD unicode normalization, stripping apostrophes/possessives,
-    and replacing punctuation/symbols with single spaces.
-    Example: "jethlal's" -> "jethlal", "Behari_lal-call.m4a" -> "behari lal call m4a"
+    Normalizes text by splitting CamelCase, lowercasing, NFKD unicode normalization,
+    stripping apostrophes/possessives, and replacing punctuation/symbols with single spaces.
+    Example: "SQLNotesForProfessionals.pdf" -> "sql notes for professionals pdf"
+             "Behari_lal-call.m4a" -> "behari lal call m4a"
     """
     if not text_input:
         return ""
     
+    # 0. Split CamelCase / PascalCase
+    camel_split = split_camel_case(text_input)
+
     # 1. Unicode normalization (NFKD)
-    normalized_unicode = unicodedata.normalize("NFKD", str(text_input))
+    normalized_unicode = unicodedata.normalize("NFKD", str(camel_split))
     
     # 2. Lowercase
     lowercased_text = normalized_unicode.lower()
@@ -207,7 +224,7 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
                     if len(q_token) >= 4 and len(s_token) >= 4:
                         if similarity >= 0.70:
                             best_token_score = max(best_token_score, similarity)
-                    elif (len(q_token) >= 4 and q_token in s_token) or (len(s_token) >= 4 and s_token in q_token):
+                    elif (len(q_token) >= 2 and q_token in s_token) or (len(s_token) >= 2 and s_token in q_token):
                         best_token_score = max(best_token_score, 0.85)
 
             if best_token_score >= 0.70:
@@ -368,7 +385,19 @@ def resolve_semantic_source(question_lower, indexed_files, query_modality="all")
         for f_base, scores in file_scores.items():
             top_c_score = max(scores)
             avg_c_score = sum(scores) / len(scores)
-            final_file_score = 0.7 * top_c_score + 0.3 * avg_c_score
+            chunk_score = 0.7 * top_c_score + 0.3 * avg_c_score
+
+            # Filename stem token overlap score
+            file_stem = os.path.splitext(f_base)[0]
+            stem_tokens = extract_entity_tokens(file_stem)
+            q_tokens = extract_entity_tokens(question_lower)
+
+            name_overlap_score = 0.0
+            if q_tokens and stem_tokens:
+                overlap_count = sum(1 for qt in q_tokens if any(qt == st or (len(qt) >= 2 and qt in st) for st in stem_tokens))
+                name_overlap_score = overlap_count / len(q_tokens)
+
+            final_file_score = 0.50 * chunk_score + 0.35 * name_overlap_score + 0.15 * (1.0 if chunk_score > 0 else 0.0)
             aggregated_scores.append((f_base, final_file_score))
 
         aggregated_scores.sort(key=lambda item: item[1], reverse=True)

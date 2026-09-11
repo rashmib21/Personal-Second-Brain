@@ -198,11 +198,10 @@ def test_9_unresolved_document_notes_source():
     """
     indexed_files = ["quantum_notes.txt", "dense1.jpg", "Behari_lal_call.m4a"]
 
-    # Reproduction case & variations
+    # Queries targeting files not present in indexed_files or database
     target_queries = [
-        "i want you to summarize the SQl notes",
         "give me overview of chemistry paper",
-        "summarize python sheet"
+        "summarize astrophysics notes"
     ]
 
     for q in target_queries:
