@@ -372,7 +372,7 @@ def translate_full_transcript(full_transcript, target_language="English", source
     Faithful full-transcript translation service using sequential batch processing.
     Splits long transcripts into sequential paragraph/line batches (~1000 chars each),
     translates each batch verbatim into target_language, and recombines in exact original order.
-    Strictly preserves all transcript content, unusual ASR names/numbers/phrases without summarization or fictitious corrections.
+    Enforces 18 strict translation rules preventing summarization, interpretation, or silent ASR correction.
     Returns tuple: (translated_transcript, translated_batch_count)
     """
     if not full_transcript or not full_transcript.strip():
@@ -410,22 +410,44 @@ def translate_full_transcript(full_transcript, target_language="English", source
 
     system_instruction = (
         f"You are a strictly verbatim transcript translator translating into {target_lang_display}. "
-        "Translate ALL input lines verbatim without summarization, omission, or hallucinated corrections. "
-        "Do NOT invent father names, family names, company names, or numbers."
+        "TRANSLATION ONLY, not summarization, interpretation, correction, or reconstruction. "
+        "1. Do NOT summarize. 2. Do NOT interpret. 3. Do NOT correct ASR errors. "
+        "4. Do NOT invent missing words. 5. Do NOT infer or correct names. 6. Do NOT infer or correct numbers. "
+        "7. Do NOT convert ambiguous speech into a plausible statement. 8. Translate understandable Hindi/Hinglish to English. "
+        "9. Preserve original meaning. 10. Preserve uncertainty if phrase is unclear. "
+        "11. Preserve names, numbers, percentages, dates, quantities, and claims. 12. Preserve original sequence/order. "
+        "13. Do NOT omit repetitive or noisy content. 14. Do NOT merge segments so information disappears. "
+        "15. Every input segment must have corresponding translated content. 16. No added explanations or comments. "
+        "17. Do not use outside knowledge. 18. RAW ASR IS THE SOURCE OF TRUTH."
     )
 
     for idx, batch_text in enumerate(batches, 1):
-        prompt = f"""You are a verbatim, faithful transcript translator.
+        prompt = f"""Translate the provided ASR transcript segment into {target_lang_display}.
 
-TASK:
-Translate Batch {idx}/{len(batches)} of the transcript below into clear, natural {target_lang_display}.
+IMPORTANT:
+This is TRANSLATION ONLY, not summarization, interpretation, correction, or reconstruction.
 
-STRICT FAITHFUL TRANSLATION RULES:
-1. Translate EVERY single sentence and line in this batch. Do NOT omit any line, name, or detail.
-2. Do NOT summarize, condense, paraphrase, or drop any text.
-3. Do NOT invent missing details, father names, company names, dates, or numbers.
-4. If the text contains unusual proper nouns, names, numbers, or noisy ASR phrases, translate the text faithfully as spoken. Never replace unusual names or numbers with fictitious or plausible alternatives.
-5. Provide ONLY the translated text for this batch. Do NOT add headers like "Batch 1:" or "Here is the translation:".
+RULES:
+1. Do NOT summarize.
+2. Do NOT interpret.
+3. Do NOT correct ASR errors.
+4. Do NOT invent missing words.
+5. Do NOT infer or correct names.
+6. Do NOT infer or correct numbers.
+7. Do NOT convert ambiguous speech into a more plausible statement.
+8. Translate understandable Hindi/Hinglish into {target_lang_display}.
+9. Preserve the original meaning as closely as possible.
+10. If a phrase is unclear in the source, preserve its uncertainty rather than guessing its intended meaning.
+11. Preserve names, numbers, percentages, dates, quantities, repeated statements, and factual claims.
+12. Preserve the original sequence/order of the transcript.
+13. Do NOT omit any content because it appears repetitive, noisy, grammatically incorrect, or meaningless.
+14. Do NOT merge separate source segments in a way that causes information to disappear.
+15. Every input segment must have corresponding translated content.
+16. Do not add explanations, comments, corrections, or assumptions.
+17. Do not use outside knowledge to repair or interpret the ASR.
+18. If the source contains an unclear/noisy phrase, translate whatever is understandable and preserve the uncertainty of the remaining part.
+
+RAW ASR IS THE SOURCE OF TRUTH.
 
 {source_label}RAW BATCH TRANSCRIPT (Segment {idx}/{len(batches)}):
 {batch_text}
