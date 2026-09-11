@@ -128,10 +128,16 @@ def run_tests():
     print(f"  Is Complete: {metrics.get('is_complete')}")
     assert "expected_chunks" in metrics, "Expected metrics dict to contain 'expected_chunks'"
     assert "is_complete" in metrics, "Expected metrics dict to contain 'is_complete'"
-    print("  PASS: Full transcript retrieval returns complete validation metrics audit")
+    # 13. Test Partial Topic Translation Scope Detection
+    q13 = "translate the part about invoice in sample.m4a into English"
+    res13 = analyze_query(q13)
+    print(f"\nTest 13 (Partial Topic Translation Scope): '{q13}'")
+    print(f"  Detected Request Scope: {res13.get('request_scope')}")
+    assert res13.get("request_scope") == "partial_topic", f"Expected 'partial_topic', got {res13.get('request_scope')}"
+    print("  PASS: Partial topic request correctly scope-classified as 'partial_topic'")
 
     print("\n" + "=" * 60)
-    print("ALL 12 TRANSLATION PIPELINE REGRESSION TESTS PASSED SUCCESSFULLY!")
+    print("ALL 13 TRANSLATION PIPELINE REGRESSION TESTS PASSED SUCCESSFULLY!")
     print("=" * 60)
 
 if __name__ == "__main__":

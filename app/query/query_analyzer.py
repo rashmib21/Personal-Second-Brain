@@ -480,6 +480,20 @@ def analyze_query(question, indexed_files=None):
     ]
     is_full_source_request = any(re.search(pattern_string, question_lower) for pattern_string in full_source_patterns)
 
+    # Detect request scope generically
+    partial_topic_patterns = [
+        r"\bpart\b", r"\bsection\b", r"\btopic\b", r"\bsegment\b", r"\bportion\b",
+        r"\babout\b", r"\bregarding\b", r"\brelated\s+to\b", r"\bdiscussing\b"
+    ]
+    has_partial_topic_indicator = any(re.search(pat, question_lower) for pat in partial_topic_patterns)
+
+    if is_full_source_request:
+        request_scope = "complete_file"
+    elif has_partial_topic_indicator:
+        request_scope = "partial_topic"
+    else:
+        request_scope = "selective"
+
     # Detect explicit target language if requested in query
     target_language = extract_target_language(question_lower)
 
@@ -492,7 +506,7 @@ def analyze_query(question, indexed_files=None):
     is_full_translation_request = False
     if is_full_source_request and (is_translation_action or target_language is not None):
         is_full_translation_request = True
-    elif is_translation_action and target_language is not None and (modality in ["audio", "document"] or source_hint is not None):
+    elif is_translation_action and target_language is not None and not has_partial_topic_indicator and (modality in ["audio", "document"] or source_hint is not None):
         is_full_translation_request = True
 
     audio_summary_phrases = [
@@ -537,6 +551,7 @@ def analyze_query(question, indexed_files=None):
 
     analysis_result = {
         "intent": intent,
+        "request_scope": request_scope,
         "temporal_intent": temporal_intent,
         "face_intent": "none",
         "is_visual_qa": (modality == "image") or is_image_summary_query or is_ocr_query,

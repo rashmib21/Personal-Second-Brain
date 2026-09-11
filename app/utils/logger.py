@@ -1,6 +1,11 @@
 import logging
 import sys #use to print logs in terminals
 
+# Suppress HTTP request logs from external HTTP clients (httpx, httpcore, urllib3)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 #create a logger object
 logger=logging.getLogger()
 

@@ -507,6 +507,11 @@ def get_full_transcript_for_source(source_path):
 			return 0
 
 		matching_rows.sort(key=extract_chunk_sequence_index)
+		ordering_guarantee = "explicit_sequence_index"
+	else:
+		ordering_guarantee = "unindexed_legacy_sequence_limitation"
+		if DEBUG:
+			print(f"WARNING: File '{os.path.basename(source_path)}' lacks explicit sequence indices (_chunk_N). Chronological ordering cannot be guaranteed by database iteration order.")
 
 	cleaned_chunks = []
 	for row in matching_rows:
@@ -527,6 +532,7 @@ def get_full_transcript_for_source(source_path):
 		"missing_chunks": missing_chunks,
 		"duplicate_chunks": duplicate_chunks,
 		"reconstructed_chunks": reconstructed_chunks_count,
+		"ordering_guarantee": ordering_guarantee,
 		"is_complete": is_complete
 	}
 

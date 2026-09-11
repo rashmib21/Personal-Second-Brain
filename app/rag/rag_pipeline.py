@@ -658,8 +658,10 @@ def ask(question, return_structured=False):
             return {"answer": learning_answer, "sources": [correct_source], "num_chunks": 1, "type": "text", "images": []}
         return learning_answer, [correct_source], 1
 
+    request_scope = analysis.get("request_scope", "selective")
+
     # Step 3: Handle Audio/Document Full Transcript & Translation Intent
-    if intent in ["AUDIO_TRANSCRIPT", "AUDIO_TRANSLATION", "transcript", "full_transcript"]:
+    if intent in ["AUDIO_TRANSCRIPT", "AUDIO_TRANSLATION", "transcript", "full_transcript"] and request_scope == "complete_file":
         if not resolved_source_path or not os.path.exists(resolved_source_path):
             target_display = os.path.basename(source_hint) if source_hint else "requested"
             unresolved_msg = f"I couldn't reliably identify the requested {target_display} file, so I won't use another file to answer this question."
