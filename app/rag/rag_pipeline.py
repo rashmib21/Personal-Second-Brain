@@ -84,93 +84,183 @@ def validate_content_grounding(context_text, answer_text, question="", source_pa
 
 def handle_temporal_query(question, analysis):
     """
-    Handles temporal file queries (e.g., 'which images added recently', 'files added today')
-    by querying the LanceDB processed_files metadata table directly.
+    Handles file listing, temporal file queries, and file count queries deterministically
+    by querying the LanceDB processed_files metadata table directly without LLM invocation.
+    Supports dynamic date parsing, modality filtering, limit extraction, and deduplication.
     """
     from datetime import datetime
+    from app.query.query_analyzer import INTENT_FILE_COUNT, INTENT_FILE_LIST, INTENT_TEMPORAL_FILE_QUERY
 
+    # Step 1: Retrieve hash table from LanceDB database
     hash_table = get_hash_table()
     if hash_table is None or hash_table.count_rows() == 0:
         return "No files have been added to the Second Brain database.", [], 0
 
-    df = hash_table.to_pandas()
-    if df.empty or "path" not in df.columns:
+    database_dataframe = hash_table.to_pandas()
+    if database_dataframe.empty or "path" not in database_dataframe.columns:
         return "No files have been added to the Second Brain database.", [], 0
 
+    # Step 2: Extract classification metadata from analysis dictionary
     modality = analysis.get("modality", "all")
-    intent = analysis.get("intent", "recent_files")
+    intent = analysis.get("intent", "TEMPORAL_FILE_QUERY")
+    temporal_intent = analysis.get("temporal_intent", "none")
+    start_datetime = analysis.get("start_datetime")
+    end_datetime = analysis.get("end_datetime")
+    date_label = analysis.get("date_label")
+    extracted_limit = analysis.get("extracted_limit")
+
+    # Step 3: Define modality file extension filters
+    audio_extensions = (".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac", ".ogg")
+    image_extensions = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")
+    pdf_extensions = (".pdf",)
+    docx_extensions = (".docx", ".doc")
+    video_extensions = (".mp4", ".mkv", ".avi", ".mov", ".webm")
+    text_extensions = (".txt", ".md", ".csv")
+
+    # Step 4: Group and deduplicate database records by file base name
+    # Re-ingestion can produce multiple entries; retain the record with the latest timestamp.
+    unique_file_map = {}
+
+    for row_index, dataframe_row in database_dataframe.iterrows():
+        path_string = str(dataframe_row.get("path", "")).strip()
+        if not path_string:
+            continue
+
+        base_filename = os.path.basename(path_string)
+
+        # Retrieve created_at timestamp string
+        created_at_raw = str(dataframe_row.get("created_at", "")).strip()
+
+        # Parse timestamp into a datetime object for comparison and filtering
+        parsed_datetime = None
+        if created_at_raw:
+            try:
+                clean_timestamp_string = created_at_raw.replace("T", " ").split(".")[0]
+                parsed_datetime = datetime.strptime(clean_timestamp_string, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                parsed_datetime = None
+
+        # Fallback to filesystem modification time if database timestamp is missing or unparseable
+        if parsed_datetime is None:
+            if os.path.exists(path_string):
+                try:
+                    file_mtime = os.path.getmtime(path_string)
+                    parsed_datetime = datetime.fromtimestamp(file_mtime)
+                except Exception:
+                    parsed_datetime = None
+
+        if parsed_datetime is None:
+            parsed_datetime = datetime.now()
+
+        # Deduplicate by retaining the record with the newest timestamp
+        if base_filename in unique_file_map:
+            existing_record = unique_file_map[base_filename]
+            if parsed_datetime > existing_record["datetime"]:
+                unique_file_map[base_filename] = {
+                    "filename": base_filename,
+                    "path": path_string,
+                    "datetime": parsed_datetime,
+                    "created_at_raw": created_at_raw
+                }
+        else:
+            unique_file_map[base_filename] = {
+                "filename": base_filename,
+                "path": path_string,
+                "datetime": parsed_datetime,
+                "created_at_raw": created_at_raw
+            }
+
+    file_records_list = list(unique_file_map.values())
+
+    # Step 5: Filter records by requested modality
+    filtered_records_list = []
+    for file_record in file_records_list:
+        filename_lower = file_record["filename"].lower()
+
+        if modality == "audio":
+            if filename_lower.endswith(audio_extensions):
+                filtered_records_list.append(file_record)
+        elif modality == "image":
+            if filename_lower.endswith(image_extensions):
+                filtered_records_list.append(file_record)
+        elif modality == "pdf":
+            if filename_lower.endswith(pdf_extensions):
+                filtered_records_list.append(file_record)
+        elif modality == "docx":
+            if filename_lower.endswith(docx_extensions):
+                filtered_records_list.append(file_record)
+        elif modality == "video":
+            if filename_lower.endswith(video_extensions):
+                filtered_records_list.append(file_record)
+        elif modality in ["text", "document"]:
+            if filename_lower.endswith(pdf_extensions + docx_extensions + text_extensions):
+                filtered_records_list.append(file_record)
+        else:
+            filtered_records_list.append(file_record)
+
+    # Step 6: Filter records by target date range if specified
+    if start_datetime is not None and end_datetime is not None:
+        date_filtered_records = []
+        for file_record in filtered_records_list:
+            record_dt = file_record["datetime"]
+            if start_datetime <= record_dt <= end_datetime:
+                date_filtered_records.append(file_record)
+        filtered_records_list = date_filtered_records
+
+    # Step 7: Sort matching records by timestamp descending (newest first)
+    filtered_records_list.sort(key=lambda item: item["datetime"], reverse=True)
+
+    # Step 8: Handle Zero Results truthful response (No semantic search fallback!)
+    if len(filtered_records_list) == 0:
+        modality_label = modality if modality != "all" else "file"
+        if date_label:
+            message_text = f"No {modality_label} files were found for {date_label}."
+        else:
+            message_text = f"No {modality_label} files were found in the database."
+        return message_text, [], 0
+
+    # Step 9: Handle File Count query intent
     question_lower = question.lower()
+    if intent == INTENT_FILE_COUNT or temporal_intent == INTENT_FILE_COUNT or "how many" in question_lower or "count of" in question_lower:
+        total_count = len(filtered_records_list)
+        modality_label = modality if modality != "all" else "file"
+        if date_label:
+            message_text = f"Total {modality_label} files added {date_label}: {total_count}."
+        else:
+            message_text = f"Total {modality_label} files added: {total_count}."
+        source_filenames = [record["filename"] for record in filtered_records_list]
+        return message_text, source_filenames, total_count
 
-    image_exts = (".jpg", ".jpeg", ".png", ".webp")
-    audio_exts = (".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac")
+    # Step 10: Apply limit if specified (e.g., top N or latest 5)
+    if extracted_limit is not None and extracted_limit > 0:
+        filtered_records_list = filtered_records_list[:extracted_limit]
 
-    records = []
-    for idx, row in df.iterrows():
-        p_str = str(row.get("path", ""))
-        base_fn = os.path.basename(p_str)
-        created_str = str(row.get("created_at", ""))
+    # Step 11: Format response output string deterministically
+    output_lines = []
+    modality_header = modality if modality != "all" else "file"
+    if date_label:
+        header_text = f"{modality_header.capitalize()}s added {date_label}:"
+    else:
+        header_text = f"Recently added {modality_header}s:"
+    output_lines.append(header_text)
 
-        if modality == "image" and not base_fn.lower().endswith(image_exts):
-            continue
-        if modality == "audio" and not base_fn.lower().endswith(audio_exts):
-            continue
+    for item_index, record_item in enumerate(filtered_records_list, start=1):
+        formatted_date_string = record_item["datetime"].strftime("%B %d, %Y, %H:%M")
+        output_lines.append(f"{item_index}. {record_item['filename']} — {formatted_date_string}")
 
-        records.append({
-            "filename": base_fn,
-            "path": p_str,
-            "created_at": created_str
-        })
-
-    if not records:
-        msg = f"No {modality if modality != 'all' else ''} files were found in the database."
-        return msg, [], 0
-
-    records.sort(key=lambda r: r["created_at"], reverse=True)
-
-    if "today" in question_lower:
-        target_date = "2026-09-10"
-        records = [r for r in records if r["created_at"].startswith(target_date)]
-    elif "yesterday" in question_lower:
-        target_date = "2026-09-09"
-        records = [r for r in records if r["created_at"].startswith(target_date)]
-    elif "september 9" in question_lower or "sep 9" in question_lower:
-        target_date = "2026-09-09"
-        records = [r for r in records if r["created_at"].startswith(target_date)]
-
-    if "latest 5" in question_lower or "5 files" in question_lower:
-        records = records[:5]
-
-    if intent == "file_count":
-        msg = f"Total {modality if modality != 'all' else ''} files added: {len(records)}."
-        sources = [r["filename"] for r in records]
-        return msg, sources, len(records)
-
-    lines = []
-    prefix = f"Recently added {modality if modality != 'all' else 'file'}s:"
-    lines.append(prefix)
-
-    for i, rec in enumerate(records, 1):
-        dt_raw = rec["created_at"]
-        formatted_dt = dt_raw
-        try:
-            dt_obj = datetime.strptime(dt_raw.split(".")[0], "%Y-%m-%d %H:%M:%S")
-            formatted_dt = dt_obj.strftime("%B %d, %Y, %H:%M")
-        except Exception:
-            pass
-
-        lines.append(f"{i}. {rec['filename']} — {formatted_dt}")
-
-    ans_str = "\n".join(lines)
-    sources = [r["filename"] for r in records]
+    answer_string = "\n".join(output_lines)
+    source_filenames = [record["filename"] for record in filtered_records_list]
+    matched_chunks_count = len(filtered_records_list)
 
     if DEBUG:
         print("\n===== TEMPORAL QUERY ROUTING =====")
-        print(f"Detected temporal intent: {intent}")
+        print(f"Detected temporal intent: {temporal_intent}")
         print(f"Modality filter: {modality}")
-        print(f"Matching files count: {len(records)}")
+        print(f"Date label filter: {date_label}")
+        print(f"Limit applied: {extracted_limit}")
+        print(f"Matching files count: {matched_chunks_count}")
 
-
-    return ans_str, sources, len(records)
+    return answer_string, source_filenames, matched_chunks_count
 
 
 
@@ -535,8 +625,8 @@ def ask(question, return_structured=False):
         print(f"Confidence: {analysis.get('source_confidence', 0.0)}")
         print(f"Method: {'fuzzy_or_exact_token' if canonical_source_id else 'unresolved'}")
 
-    # Check for Temporal Query Intent first
-    if temporal_intent != "none":
+    # Check for Temporal Query Intent / File Listing / Metadata Inventory first
+    if temporal_intent != "none" or intent in ["TEMPORAL_FILE_QUERY", "FILE_LIST", "FILE_COUNT"]:
         ans_str, sources, num_chunks = handle_temporal_query(question, analysis)
         update_last_interaction(question, ans_str, sources, modality)
         if return_structured:

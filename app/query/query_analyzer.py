@@ -337,31 +337,78 @@ def analyze_query(question, indexed_files=None):
     ]
     is_correction = any(re.search(pat, question_lower) for pat in correction_patterns)
 
-    # Step 2: Extract Temporal Intent
+    # Step 2: Generic Metadata / File Inventory & Temporal Intent Extraction
+    from app.utils.date_parser import parse_date_expression
+    start_dt, end_dt, date_label = parse_date_expression(question_lower)
+
+    file_list_patterns = [
+        r"\blist\s+(?:all\s+)?files?\b", r"\bshow\s+(?:all\s+)?files?\b", r"\blist\s+(?:all\s+)?images?\b", r"\bshow\s+(?:all\s+)?images?\b",
+        r"\blist\s+(?:all\s+)?audio\b", r"\bshow\s+(?:all\s+)?audio\b", r"\blist\s+(?:all\s+)?documents?\b", r"\bshow\s+(?:all\s+)?documents?\b",
+        r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\b.*\b(?:files?|images?|audio|documents?)\b",
+        r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\baudio\s+added\b",
+        r"\brecent\s+files?\b", r"\blatest\s+files?\b", r"\bnewest\s+files?\b", r"\bmost\s+recent\b",
+        r"\brecently\s+added\b", r"\bnewly\s+added\b", r"\bdate-wise\b", r"\bdatewise\b", r"\bby\s+date\b",
+        r"\b(?:top|latest|recent|first)\s+\d+\s*(?:files?|images?|audio|documents?)\b",
+        r"\b\d+\s+(?:recent|latest)\s+(?:files?|images?|audio|documents?)\b"
+    ]
+    is_file_list_query = any(re.search(pat, question_lower) for pat in file_list_patterns) or (start_dt is not None)
+
+    count_temporal_patterns = [
+        r"\bhow\s+many\s+files\b", r"\bhow\s+many\s+images\b", r"\bhow\s+many\s+audio\b", r"\bcount\s+of\s+files\b"
+    ]
+    is_count_temporal_query = any(re.search(pat, question_lower) for pat in count_temporal_patterns)
+
+    # Dynamic limit extraction (e.g. 'latest 5 files', '5 recent images', 'top 10 files')
+    question_without_date_words = re.sub(
+        r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+\d{1,2}\b",
+        "",
+        question_lower
+    )
+    question_without_date_words = re.sub(
+        r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b",
+        "",
+        question_without_date_words
+    )
+    question_without_date_words = re.sub(r"\b\d{4}\b", "", question_without_date_words)
+
+    explicit_limit_match = re.search(
+        r"\b(?:top|latest|recent|first)\s+(\d{1,2})\b|\b(\d{1,2})\s+(?:recent|latest|files?|images?|audio|documents?)\b",
+        question_without_date_words
+    )
+    extracted_limit = None
+    if explicit_limit_match:
+        number_string = explicit_limit_match.group(1) or explicit_limit_match.group(2)
+        if number_string:
+            extracted_limit = int(number_string)
+
+    # Default limit to 5 if user asked for recent/latest files without specifying an explicit limit
+    if extracted_limit is None and any(word in question_lower for word in ["recent", "latest", "newest"]):
+        extracted_limit = 5
+
     temporal_intent = "none"
-    recent_patterns = [r"\badded\s+recently\b", r"\brecently\s+added\b", r"\blatest\s+files\b", r"\brecent\s+files\b", r"\brecent\s+images\b"]
-    datewise_patterns = [r"\bdate-wise\s+list\b", r"\bdatewise\s+list\b", r"\bby\s+date\b"]
-    date_filter_patterns = [r"\badded\s+today\b", r"\badded\s+yesterday\b", r"\bwere\s+added\s+today\b", r"\bwere\s+added\s+yesterday\b"]
-    count_temporal_patterns = [r"\bhow\s+many\s+files\s+added\b", r"\bhow\s+many\s+images\s+added\b", r"\bhow\s+many\s+files\s+were\s+added\b"]
-
-    if any(re.search(pat, question_lower) for pat in datewise_patterns):
-        temporal_intent = INTENT_TEMPORAL_FILE_QUERY
-    elif any(re.search(pat, question_lower) for pat in count_temporal_patterns):
+    if is_count_temporal_query:
         temporal_intent = INTENT_FILE_COUNT
-    elif any(re.search(pat, question_lower) for pat in date_filter_patterns):
-        temporal_intent = INTENT_TEMPORAL_FILE_QUERY
-    elif any(re.search(pat, question_lower) for pat in recent_patterns):
+    elif is_file_list_query:
         temporal_intent = INTENT_TEMPORAL_FILE_QUERY
 
-    # Step 3: Modality Detection
+    # Step 3: Modality & File Type Categorization
     modality = "all"
     audio_keywords = ["audio", "sound", "m4a", "mp3", "wav", "mpeg", "recording", "speaker", "speak", "voice", "con call", "talk"]
     image_keywords = ["image", "images", "picture", "pictures", "photo", "photos", "visual", "diagram", "chart", "figure", "jpg", "jpeg", "png", "webp"]
+    pdf_keywords = ["pdf", "pdfs"]
+    doc_keywords = ["docx", "doc", "document", "documents"]
+    video_keywords = ["video", "videos", "mp4", "mkv", "avi", "mov"]
 
     if any(kw in question_lower for kw in audio_keywords):
         modality = "audio"
     elif any(kw in question_lower for kw in image_keywords):
         modality = "image"
+    elif any(kw in question_lower for kw in pdf_keywords):
+        modality = "pdf"
+    elif any(kw in question_lower for kw in doc_keywords):
+        modality = "docx"
+    elif any(kw in question_lower for kw in video_keywords):
+        modality = "video"
 
     # Step 4: Source Hint Resolution & Explicit Source Detection
     source_hint = None
@@ -564,6 +611,10 @@ def analyze_query(question, indexed_files=None):
         "source_confidence": source_confidence,
         "target_language": target_language,
         "is_correction": is_correction,
+        "start_datetime": start_dt,
+        "end_datetime": end_dt,
+        "date_label": date_label,
+        "extracted_limit": extracted_limit,
         "needs_database": True
     }
 
