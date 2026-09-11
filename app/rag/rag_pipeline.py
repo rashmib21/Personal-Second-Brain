@@ -16,6 +16,8 @@ from app.rag.image_summarizer import summarize_image
 from app.search.object_search import search_images_by_object
 from app.search.face_search import is_face_search_query, search_images_by_face, extract_person_name_from_question
 from app.services.interaction_state import get_last_interaction, update_last_interaction
+from config import DEBUG
+
 
 
 def validate_content_grounding(context_text, answer_text, question="", source_path=""):
@@ -161,10 +163,12 @@ def handle_temporal_query(question, analysis):
     ans_str = "\n".join(lines)
     sources = [r["filename"] for r in records]
 
-    print("\n===== TEMPORAL QUERY ROUTING =====")
-    print(f"Detected temporal intent: {intent}")
-    print(f"Modality filter: {modality}")
-    print(f"Matching files count: {len(records)}")
+    if DEBUG:
+        print("\n===== TEMPORAL QUERY ROUTING =====")
+        print(f"Detected temporal intent: {intent}")
+        print(f"Modality filter: {modality}")
+        print(f"Matching files count: {len(records)}")
+
 
     return ans_str, sources, len(records)
 
@@ -199,26 +203,6 @@ def clean_llm_answer(raw_answer):
         filtered_lines.append(line)
     return "\n".join(filtered_lines).strip()
 
-
-def ask(question, return_structured=False):
-    """
-    Main Multimodal RAG Orchestrator function connecting 4 independent systems:
-    System A — Hard Source Routing
-    System B — Visual Question Answering
-    System C — Face Recognition & Memory
-    System D — Feedback / Learning Memory
-    """
-    from app.services.face_service import (
-        analyze_faces_in_image,
-        register_pending_face,
-        search_images_by_registered_face,
-        FACE_COSINE_DISTANCE_THRESHOLD
-    )
-    from app.services.interaction_state import (
-        get_pending_faces,
-        set_pending_faces,
-        clear_pending_faces
-    )
 
 def is_filename_stem_match(target_token, filename):
     """
@@ -283,16 +267,17 @@ def handle_metadata_query(question, analysis):
                 chunk_count = len(matching)
 
         response_text = f"{target_file} has {chunk_count} indexed chunks."
-        print("\n===== QUERY INTENT =====")
-        print(f"Intent: {intent}")
-        print("\n===== SOURCE RESOLUTION =====")
-        print(f"Requested source: {source_hint}")
-        print(f"Resolved source: {target_file}")
-        print(f"Canonical path: {target_path}")
-        print("Resolution method: deterministic_metadata")
-        print("\n===== METADATA QUERY EXECUTION =====")
-        print(f"Chunk count: {chunk_count}")
-        return response_text, [target_file], chunk_count
+        if DEBUG:
+            print("\n===== QUERY INTENT =====")
+            print(f"Intent: {intent}")
+            print("\n===== SOURCE RESOLUTION =====")
+            print(f"Requested source: {source_hint}")
+            print(f"Resolved source: {target_file}")
+            print(f"Canonical path: {target_path}")
+            print("Resolution method: deterministic_metadata")
+            print("\n===== METADATA QUERY EXECUTION =====")
+            print(f"Chunk count: {chunk_count}")
+        return response_text, [target_file], chunk_count, {"type": "file_metadata", "chunk_count": chunk_count, "target_file": target_file}
 
     elif intent in ["IMAGE_FILENAME_QUERY", "image_filename_query"]:
         from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens
@@ -313,15 +298,19 @@ def handle_metadata_query(question, analysis):
 
         matched_images.sort()
         if matched_images:
-            response_text = "\n".join(matched_images)
+            formatted_list = []
+            for idx, img_name in enumerate(matched_images, 1):
+                formatted_list.append(f"{idx}. {img_name}")
+            response_text = "\n".join(formatted_list)
         else:
             response_text = f"No images found matching '{entity_tokens[0] if entity_tokens else ''}'."
 
-        print("\n===== QUERY INTENT =====")
-        print(f"Intent: {intent}")
-        print("\n===== METADATA QUERY EXECUTION =====")
-        print(f"Matched filenames: {matched_images}")
-        return response_text, matched_images, len(matched_images)
+        if DEBUG:
+            print("\n===== QUERY INTENT =====")
+            print(f"Intent: {intent}")
+            print("\n===== METADATA QUERY EXECUTION =====")
+            print(f"Matched filenames: {matched_images}")
+        return response_text, matched_images, len(matched_images), {"type": "image_metadata", "matched": matched_images}
 
     elif intent in ["IMAGE_COUNT_QUERY", "image_count_query"]:
         from app.query.query_analyzer import get_indexed_filenames, extract_entity_tokens
@@ -344,14 +333,15 @@ def handle_metadata_query(question, analysis):
         count = len(matched_images)
         response_text = f"{count}" if "how many" in question.lower() else f"Found {count} image(s) matching criteria."
 
-        print("\n===== QUERY INTENT =====")
-        print(f"Intent: {intent}")
-        print("\n===== METADATA QUERY EXECUTION =====")
-        print(f"Count: {count}")
-        print(f"Matched filenames: {matched_images}")
-        return response_text, matched_images, count
+        if DEBUG:
+            print("\n===== QUERY INTENT =====")
+            print(f"Intent: {intent}")
+            print("\n===== METADATA QUERY EXECUTION =====")
+            print(f"Count: {count}")
+            print(f"Matched filenames: {matched_images}")
+        return response_text, matched_images, count, {"type": "image_metadata", "count": count, "matched": matched_images}
 
-    return "No metadata query matching criteria.", [], 0
+    return "No metadata query matching criteria.", [], 0, {}
 
 
 def handle_speaker_query(question, analysis):
@@ -368,12 +358,58 @@ def handle_speaker_query(question, analysis):
     else:
         response_text = "The indexed transcript does not contain reliable speaker diarization, so I cannot determine the exact number of speakers."
 
-    print("\n===== QUERY INTENT =====")
-    print(f"Intent: {analysis.get('intent')}")
-    print("\n===== AUDIO SPEAKER QUERY EXECUTION =====")
-    print(f"Target file: {target_file}")
-    print(f"Response: {response_text}")
+    if DEBUG:
+        print("\n===== QUERY INTENT =====")
+        print(f"Intent: {analysis.get('intent')}")
+        print("\n===== AUDIO SPEAKER QUERY EXECUTION =====")
+        print(f"Target file: {target_file}")
+        print(f"Response: {response_text}")
     return response_text, [target_file] if source_hint else [], 1
+
+
+def translate_full_transcript(full_transcript, target_language="English", source_filename=""):
+    """
+    Faithful full-transcript translation service.
+    Translates reconstructed complete source transcript segment-by-segment into target_language.
+    Strictly preserves all transcript content, unusual ASR names/numbers/phrases without summarization or fictitious corrections.
+    """
+    if not full_transcript or not full_transcript.strip():
+        return ""
+
+    target_lang_display = target_language.capitalize() if target_language else "English"
+    source_label = f"Source File: {os.path.basename(source_filename)}\n" if source_filename else ""
+
+    prompt = f"""You are a verbatim, faithful transcript translator.
+
+TASK:
+Translate the complete source transcript below into clear, natural {target_lang_display}.
+
+STRICT FAITHFUL TRANSLATION RULES:
+1. Translate EVERY single sentence and segment of the transcript. Do NOT omit any paragraph, sentence, name, or detail.
+2. Do NOT summarize, condense, paraphrase, or drop any text.
+3. Do NOT invent missing details, father names, company names, dates, or numbers.
+4. If the transcript contains unusual proper nouns, names, numbers, or noisy ASR phrases, translate the text faithfully as spoken. Never replace unusual names or numbers with fictitious or plausible alternatives.
+5. Provide ONLY the translated transcript text. Do NOT add meta-commentary like "Here is the translation:".
+
+{source_label}RAW SOURCE TRANSCRIPT:
+{full_transcript}
+
+FAITHFUL {target_lang_display.upper()} TRANSLATION:"""
+
+    system_instruction = (
+        f"You are a strictly faithful transcript translator translating into {target_lang_display}. "
+        "Translate ALL content verbatim without summarization, omission, or hallucinated corrections."
+    )
+
+    try:
+        translated = ask_llama(prompt, system_instruction=system_instruction)
+    except Exception:
+        try:
+            translated = ask_gemini(prompt)
+        except Exception as e:
+            translated = f"Translation Error: {str(e)}"
+
+    return clean_llm_answer(translated)
 
 
 def ask(question, return_structured=False):
@@ -410,25 +446,27 @@ def ask(question, return_structured=False):
     speaker_reference = analysis.get("speaker_reference")
     is_correction = analysis.get("is_correction", False)
     correction_details = analysis.get("correction_details", {})
+    target_language = analysis.get("target_language")
 
     last_state = get_last_interaction()
 
     # Print Standardized Debug Log
-    print("\n===== QUERY =====")
-    print(f"Question: {question}")
-    print("\n===== INTENT =====")
-    print(f"Intent: {intent}")
-    print("\n===== MODALITY =====")
-    print(f"Modality: {modality}")
-    print("\n===== EXPLICIT SOURCE DETECTED =====")
-    print(f"Explicit source requested: {bool(source_hint)}")
-    print("\n===== NORMALIZED SOURCE QUERY =====")
-    print(f"Normalized source query: {source_hint}")
-    print("\n===== SOURCE RESOLUTION =====")
-    print(f"Requested: {source_hint}")
-    print(f"Resolved: {os.path.basename(canonical_source_id) if canonical_source_id else source_hint}")
-    print(f"Confidence: {analysis.get('source_confidence', 0.0)}")
-    print(f"Method: {'fuzzy_or_exact_token' if canonical_source_id else 'unresolved'}")
+    if DEBUG:
+        print("\n===== QUERY =====")
+        print(f"Question: {question}")
+        print("\n===== INTENT =====")
+        print(f"Intent: {intent}")
+        print("\n===== MODALITY =====")
+        print(f"Modality: {modality}")
+        print("\n===== EXPLICIT SOURCE DETECTED =====")
+        print(f"Explicit source requested: {bool(source_hint)}")
+        print("\n===== NORMALIZED SOURCE QUERY =====")
+        print(f"Normalized source query: {source_hint}")
+        print("\n===== SOURCE RESOLUTION =====")
+        print(f"Requested: {source_hint}")
+        print(f"Resolved: {os.path.basename(canonical_source_id) if canonical_source_id else source_hint}")
+        print(f"Confidence: {analysis.get('source_confidence', 0.0)}")
+        print(f"Method: {'fuzzy_or_exact_token' if canonical_source_id else 'unresolved'}")
 
     # Check for Temporal Query Intent first
     if temporal_intent != "none":
@@ -440,10 +478,15 @@ def ask(question, return_structured=False):
 
     # Check for Deterministic Metadata Queries (No LLM call!)
     if intent in ["FILE_METADATA", "IMAGE_FILENAME_QUERY", "IMAGE_COUNT_QUERY", "IMAGE_FILENAME_QUERY", "image_filename_query", "image_count_query"]:
-        ans_str, sources, num_chunks = handle_metadata_query(question, analysis)
+        res_meta = handle_metadata_query(question, analysis)
+        if isinstance(res_meta, tuple) and len(res_meta) == 4:
+            ans_str, sources, num_chunks, meta_info = res_meta
+        else:
+            ans_str, sources, num_chunks = res_meta[0], res_meta[1], res_meta[2]
+            meta_info = {}
         update_last_interaction(question, ans_str, sources, modality)
         if return_structured:
-            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
+            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "metadata_info": meta_info, "type": "text", "images": []}
         return ans_str, sources, num_chunks
 
     # Check for Speaker Queries
@@ -465,13 +508,15 @@ def ask(question, return_structured=False):
         target_display = clean_name.capitalize() if clean_name else "requested"
         unresolved_msg = f"I couldn't reliably identify the requested {target_display} file, so I won't use another file to answer this question."
         
-        print("\n===== SOURCE FILTER =====")
-        print(f"Source filter: UNRESOLVED ({source_hint}) -> 0 candidates retrieved. Preventing fallback to unrelated files.")
+        if DEBUG:
+            print("\n===== SOURCE FILTER =====")
+            print(f"Source filter: UNRESOLVED ({source_hint}) -> 0 candidates retrieved. Preventing fallback to unrelated files.")
         
         update_last_interaction(question, unresolved_msg, [], modality)
         if return_structured:
             return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
         return unresolved_msg, [], 0
+
 
     # Check for pending face registration flow first
     pending_faces = get_pending_faces()
@@ -546,36 +591,55 @@ def ask(question, return_structured=False):
             return {"answer": learning_answer, "sources": [correct_source], "num_chunks": 1, "type": "text", "images": []}
         return learning_answer, [correct_source], 1
 
-    # Step 3: Handle Audio Full Transcript Intent
-    if intent in ["AUDIO_TRANSCRIPT", "transcript", "full_transcript"] and resolved_source_path and os.path.exists(resolved_source_path):
+    # Step 3: Handle Audio/Document Full Transcript & Translation Intent
+    if intent in ["AUDIO_TRANSCRIPT", "AUDIO_TRANSLATION", "transcript", "full_transcript"] and resolved_source_path and os.path.exists(resolved_source_path):
         full_transcript, total_chunks = get_full_transcript_for_source(resolved_source_path)
         if full_transcript:
             src_name = os.path.basename(resolved_source_path)
-            validate_content_grounding(full_transcript, full_transcript, question, resolved_source_path)
 
-            print("\n===== TRANSCRIPT DEBUG =====")
-            print(f"Source: {src_name}")
-            print(f"Chunk count: {total_chunks}")
-            print(f"Reconstructed length: {len(full_transcript)} chars")
+            if intent == "AUDIO_TRANSLATION" or target_language is not None:
+                target_lang_name = target_language if target_language else "English"
+                final_output = translate_full_transcript(full_transcript, target_language=target_lang_name, source_filename=resolved_source_path)
+            else:
+                final_output = full_transcript
 
-            update_last_interaction(question, full_transcript, [src_name], modality)
+            validate_content_grounding(full_transcript, final_output, question, resolved_source_path)
+
+            if DEBUG:
+                print("\n===== TRANSCRIPT DEBUG =====")
+                print(f"Source: {src_name}")
+                print(f"Chunk count: {total_chunks}")
+                print(f"Intent: {intent}")
+                print(f"Target language: {target_language}")
+                print(f"Reconstructed length: {len(full_transcript)} chars")
+                print(f"Output length: {len(final_output)} chars")
+
+            update_last_interaction(question, final_output, [src_name], modality)
             if return_structured:
-                return {"answer": full_transcript, "sources": [src_name], "num_chunks": total_chunks, "type": "text", "images": []}
-            return full_transcript, [src_name], total_chunks
+                return {
+                    "answer": final_output,
+                    "sources": [src_name],
+                    "num_chunks": total_chunks,
+                    "evidence": [{"source": src_name, "chunk_id": 1, "text": full_transcript}],
+                    "type": "text",
+                    "images": []
+                }
+            return final_output, [src_name], total_chunks
 
     # Check for explicit Image OCR intent
     if intent in ["IMAGE_OCR", "image_ocr"] and resolved_source_path and os.path.exists(resolved_source_path):
         ocr_text, total_chunks = get_stored_ocr_text_for_image(resolved_source_path)
         src_name = os.path.basename(resolved_source_path)
 
-        print("\n===== IMAGE DEBUG =====")
-        print(f"Source: {src_name}")
-        print(f"OCR length: {len(ocr_text)} chars")
+        if DEBUG:
+            print("\n===== IMAGE DEBUG =====")
+            print(f"Source: {src_name}")
+            print(f"OCR length: {len(ocr_text)} chars")
 
         if ocr_text and ocr_text.strip():
             update_last_interaction(question, ocr_text, [src_name], "image")
             if return_structured:
-                return {"answer": ocr_text, "sources": [src_name], "num_chunks": total_chunks, "type": "text", "images": []}
+                return {"answer": ocr_text, "sources": [src_name], "num_chunks": total_chunks, "ocr_text": ocr_text, "type": "text", "images": []}
             return ocr_text, [src_name], total_chunks
 
     # Check for Image Routing Branches (Source Image Retrieval, Face Verification, Face Memory Search)
@@ -603,8 +667,9 @@ def ask(question, return_structured=False):
 
     # ROUTE BRANCH 1: Source-Based Image Retrieval
     if is_image_source_resolved and is_explicit_image_retrieval and not is_person_verification_query and not is_visual_qa:
-        print("\n===== IMAGE ROUTING =====")
-        print("Route: source_image_retrieval")
+        if DEBUG:
+            print("\n===== IMAGE ROUTING =====")
+            print("Route: source_image_retrieval")
         src_name = os.path.basename(resolved_source_path)
         ans_str = f"Retrieved image source '{src_name}'."
         update_last_interaction(question, ans_str, [src_name], "image")
@@ -621,8 +686,9 @@ def ask(question, return_structured=False):
 
     # ROUTE BRANCH 2: Face Verification inside Specific Image Source
     elif is_image_source_resolved and is_person_verification_query:
-        print("\n===== IMAGE ROUTING =====")
-        print("Route: face_verification")
+        if DEBUG:
+            print("\n===== IMAGE ROUTING =====")
+            print("Route: face_verification")
         target_img = resolved_source_path
         face_res = analyze_faces_in_image(target_img)
         faces_detected = face_res.get("faces_detected", 0)
@@ -665,8 +731,9 @@ def ask(question, return_structured=False):
 
     # ROUTE BRANCH 3: Persistent Face-Memory Search
     elif (face_intent == "face_search" or is_face_search_query(question)) and not is_image_source_resolved:
-        print("\n===== IMAGE ROUTING =====")
-        print("Route: face_memory_search")
+        if DEBUG:
+            print("\n===== IMAGE ROUTING =====")
+            print("Route: face_memory_search")
         if person_name:
             matched_records = search_images_by_registered_face(person_name)
             if not matched_records:
@@ -708,9 +775,11 @@ def ask(question, return_structured=False):
         ocr_text, ocr_chunks = get_stored_ocr_text_for_image(target_img)
         src_name = os.path.basename(target_img)
 
-        print("\n===== IMAGE DEBUG =====")
-        print(f"Source: {src_name}")
-        print(f"OCR length: {len(ocr_text)} chars")
+        if DEBUG:
+            print("\n===== IMAGE DEBUG =====")
+            print(f"Source: {src_name}")
+            print(f"OCR length: {len(ocr_text)} chars")
+
 
         if ocr_text and ocr_text.strip():
             vqa_prompt = f"""You are a Visual Assistant. Analyze the image content below and fulfill the user request.
@@ -863,10 +932,26 @@ Answer:"""
     update_last_interaction(question, clean_answer, sources, modality)
 
     if return_structured:
+        evidence_list = []
+        if 'results' in locals() and results:
+            for idx, doc in enumerate(results, 1):
+                evidence_list.append({
+                    "source": os.path.basename(doc.get("path", "")),
+                    "chunk_id": doc.get("chunk_id", idx),
+                    "timestamp": doc.get("timestamp", ""),
+                    "text": doc.get("text", "")
+                })
+        elif 'full_transcript' in locals() and full_transcript:
+            evidence_list.append({
+                "source": os.path.basename(resolved_source_path) if resolved_source_path else "Audio",
+                "chunk_id": 1,
+                "text": full_transcript
+            })
         return {
             "answer": clean_answer,
             "sources": sources,
             "num_chunks": num_chunks,
+            "evidence": evidence_list,
             "type": "text",
             "images": []
         }
@@ -895,47 +980,124 @@ def summarize(question, context):
             return f"LLM Error: {str(e)}"
 
 
-def format_response(arg1, arg2=None, arg3=None, arg4=0):
+def format_response(arg1, arg2=None, arg3=None, arg4=0, evidence=None):
     """
-    Formats the final structured output separating natural language answer from metadata.
-    Supports format_response(question, answer, sources, num_chunks) and format_response(answer, sources, num_chunks).
+    Formats the clean CLI terminal output according to user-facing specifications.
+    Supports:
+    - format_response(question, res_dict)
+    - format_response(question, answer, sources, num_chunks)
+    - format_response(answer, sources, num_chunks)
     """
-    from app.query.query_analyzer import resolve_canonical_source_id
+    question = ""
+    answer = ""
+    sources = []
+    num_chunks = 0
+    evidence_list = []
+    ocr_text = ""
+    metadata_info = {}
 
-    if isinstance(arg2, (list, tuple)) or (isinstance(arg1, str) and not isinstance(arg2, str) and arg2 is not None):
+    if isinstance(arg2, dict):
+        question = arg1 if isinstance(arg1, str) else ""
+        answer = arg2.get("answer", "")
+        sources = arg2.get("sources", [])
+        num_chunks = arg2.get("num_chunks", 0)
+        evidence_list = arg2.get("evidence", [])
+        ocr_text = arg2.get("ocr_text", "")
+        metadata_info = arg2.get("metadata_info", {})
+    elif isinstance(arg2, (list, tuple)) or (isinstance(arg1, str) and not isinstance(arg2, str) and arg2 is not None):
+        question = ""
         answer = arg1
         sources = arg2 if arg2 is not None else []
         num_chunks = arg3 if arg3 is not None else 0
+        evidence_list = evidence if evidence is not None else []
     else:
+        question = arg1 if isinstance(arg1, str) else ""
         answer = arg2 if arg2 is not None else ""
         sources = arg3 if arg3 is not None else []
         num_chunks = arg4
+        evidence_list = evidence if evidence is not None else []
 
-    if sources:
-        first_src = sources[0]
-        src_str = os.path.basename(first_src)
-        if os.path.isabs(first_src) and os.path.exists(first_src):
-            path_str = first_src
+    header = "=" * 60
+    sections = []
+
+    # 1. USER QUERY Section
+    if question and question.strip():
+        sections.append(f"{header}\nUSER QUERY\n{header}\n{question.strip()}")
+
+    # 2. ANSWER Section
+    sections.append(f"{header}\nANSWER\n{header}\n{answer.strip() if answer else 'No answer generated.'}")
+
+    # 3. SOURCES / RELEVANT CHUNKS Section
+    src_parts = []
+
+    # Check for Metadata Query Evidence
+    if metadata_info:
+        meta_type = metadata_info.get("type")
+        if meta_type == "image_metadata":
+            src_parts.append("Image metadata")
+        elif "chunk_count" in metadata_info:
+            target_file = metadata_info.get("target_file", sources[0] if sources else "unknown")
+            count = metadata_info.get("chunk_count", num_chunks)
+            src_parts.append(f"Source: {os.path.basename(target_file)}")
+            src_parts.append(f"Metadata: chunk_count = {count}")
+    # Check for OCR Evidence
+    elif ocr_text and ocr_text.strip():
+        src_name = os.path.basename(sources[0]) if sources else "Image"
+        src_parts.append(f"Source: {src_name}")
+        src_parts.append("")
+        src_parts.append("OCR:")
+        src_parts.append(ocr_text.strip())
+    # Check for Retrieved Chunk Evidence
+    elif evidence_list:
+        grouped_evidence = {}
+        for ev in evidence_list:
+            s_name = os.path.basename(ev.get("source", "Unknown"))
+            if s_name not in grouped_evidence:
+                grouped_evidence[s_name] = []
+            grouped_evidence[s_name].append(ev)
+
+        for s_name, chunks in grouped_evidence.items():
+            src_parts.append(f"Source: {s_name}")
+            src_parts.append("")
+            for idx, chk in enumerate(chunks, 1):
+                c_id = chk.get('chunk_id', idx)
+                chunk_label = f"Chunk {c_id}"
+                timestamp = chk.get("timestamp", "")
+                text = chk.get("text", "").strip()
+
+                src_parts.append(chunk_label)
+                if timestamp:
+                    src_parts.append(f"Timestamp: {timestamp}")
+                if text:
+                    src_parts.append(text)
+                src_parts.append("")
+    # Fallback to source list
+    elif sources:
+        if len(sources) == 1:
+            src_parts.append(f"Source: {os.path.basename(sources[0])}")
         else:
-            canonical_path = resolve_canonical_source_id(first_src)
-            path_str = canonical_path if canonical_path else first_src
+            for s in sources:
+                src_parts.append(f"Source: {os.path.basename(s)}")
     else:
-        src_str = "None"
-        path_str = "None"
+        src_parts.append("None")
 
-    output = f"ANSWER\n{answer}\n\nSOURCE\n{src_str}\n\nPATH\n{path_str}\n\nRELEVANT CHUNKS\n{num_chunks}"
-    return output
+    sources_block = "\n".join(src_parts).strip()
+    sections.append(f"{header}\nSOURCES / RELEVANT CHUNKS\n{header}\n{sources_block}")
+
+    return "\n\n".join(sections)
 
 
 
 if __name__ == "__main__":
     while True:
-        print("\n" + "=" * 75)
-        question = input("\nAsk: ")
-        if question.lower() == "exit":
+        try:
+            question = input("\nAsk: ")
+        except (EOFError, KeyboardInterrupt):
+            break
+        if question.lower().strip() in ["exit", "quit"]:
             break
         if not question.strip():
             continue
 
-        answer, sources, num_chunks = ask(question)
-        print(format_response(question, answer, sources, num_chunks))
+        res_struct = ask(question, return_structured=True)
+        print("\n" + format_response(question, res_struct))

@@ -283,6 +283,33 @@ def resolve_canonical_source_id(source_hint):
     return source_hint
 
 
+def extract_target_language(text_input):
+    """
+    Generic language target extraction function.
+    Parses queries for explicit language conversion targets (e.g. 'in english', 'to french', 'in spanish').
+    Returns language name string or None.
+    """
+    if not text_input:
+        return None
+
+    lowercased_text = text_input.lower()
+    supported_languages = [
+        "english", "hindi", "hinglish", "french", "german",
+        "spanish", "italian", "portuguese", "japanese", "chinese", "russian"
+    ]
+
+    for language_name in supported_languages:
+        # Check explicit preposition patterns like "in english", "to english", "into english"
+        in_pattern = r"\bin\s+" + re.escape(language_name) + r"\b"
+        to_pattern = r"\bto\s+" + re.escape(language_name) + r"\b"
+        into_pattern = r"\binto\s+" + re.escape(language_name) + r"\b"
+
+        if re.search(in_pattern, lowercased_text) or re.search(to_pattern, lowercased_text) or re.search(into_pattern, lowercased_text):
+            return language_name
+
+    return None
+
+
 def analyze_query(question, indexed_files=None):
     """
     Analyzes the user query and produces structured classification output containing:
@@ -293,6 +320,7 @@ def analyze_query(question, indexed_files=None):
     - source_hint: resolved filename string if query specifies a source
     - canonical_source_id: full resolved path to source file
     - unresolved_explicit_source: True if query requested explicit source which failed resolution
+    - target_language: explicit language conversion target if specified in query
     """
     question_lower = question.strip().lower()
 
@@ -437,7 +465,30 @@ def analyze_query(question, indexed_files=None):
     ]
     is_image_summary_query = any(isp in question_lower for isp in image_summary_phrases)
 
-    is_full_transcript = any(p in question_lower for p in ["full transcript", "entire transcript", "complete transcript", "give me the transcript"])
+    # Generic detection for full-source transcript and full-source translation requests
+    full_source_patterns = [
+        r"\ball\s+the\s+text\b", r"\ball\s+text\b", r"\bcomplete\s+transcript\b",
+        r"\bentire\s+transcript\b", r"\bfull\s+transcript\b", r"\bentire\s+audio\b",
+        r"\ball\s+of\s+the\s+audio\b", r"\bcomplete\s+audio\b", r"\bfull\s+content\b",
+        r"\bcomplete\s+content\b", r"\beverything\s+said\b", r"\beverything\s+in\b",
+        r"\bwhole\s+text\b", r"\bwhole\s+transcript\b", r"\bconvert\s+all\b", r"\btranslate\s+all\b"
+    ]
+    is_full_source_request = any(re.search(pattern_string, question_lower) for pattern_string in full_source_patterns)
+
+    # Detect explicit target language if requested in query
+    target_language = extract_target_language(question_lower)
+
+    # Detect translation/conversion action verbs
+    translation_action_patterns = [
+        r"\bconvert\b", r"\btranslate\b", r"\btranslation\b", r"\bconversion\b"
+    ]
+    is_translation_action = any(re.search(pattern_string, question_lower) for pattern_string in translation_action_patterns)
+
+    is_full_translation_request = False
+    if is_full_source_request and (is_translation_action or target_language is not None):
+        is_full_translation_request = True
+    elif is_translation_action and target_language is not None and (modality == "audio" or source_hint is not None):
+        is_full_translation_request = True
 
     audio_summary_phrases = [
         "summarize", "summarise", "summary", "overview",
@@ -459,7 +510,9 @@ def analyze_query(question, indexed_files=None):
         intent = INTENT_FILE_METADATA
     elif is_speaker_query:
         intent = INTENT_AUDIO_SPEAKER_QUERY
-    elif is_full_transcript:
+    elif is_full_translation_request:
+        intent = INTENT_AUDIO_TRANSLATION
+    elif is_full_source_request:
         intent = INTENT_AUDIO_TRANSCRIPT
     elif is_ocr_query:
         intent = INTENT_IMAGE_OCR
@@ -489,6 +542,7 @@ def analyze_query(question, indexed_files=None):
         "canonical_source_id": canonical_source_id,
         "unresolved_explicit_source": unresolved_explicit_source,
         "source_confidence": source_confidence,
+        "target_language": target_language,
         "is_correction": is_correction,
         "needs_database": True
     }

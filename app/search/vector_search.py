@@ -5,6 +5,8 @@ from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from app.storage.lancedb_store import get_table, get_image_table
 from app.embeddings.embedding_router import generate_embedding
 from app.embeddings.image_embedding import embed_image, get_clip_model
+from config import DEBUG
+
 
 #takes a question and one chunk of text together as a pair, and directly outputs how relevant that chunk actually is to the question — instead of comparing separate embeddings or matching separate words, it reads both at once and judges the match itself.
 from sentence_transformers import CrossEncoder 
@@ -174,7 +176,8 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 			})
 
 	if len(all_indexed_rows) == 0:
-		print("No indexed data found in database.")
+		if DEBUG:
+			print("No indexed data found in database.")
 		return []
 
 	# Filter out noise chunks and rejected sources
@@ -193,7 +196,8 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 
 	unresolved_flag = analysis.get("unresolved_explicit_source", False)
 	if (source_hint and str(source_hint).startswith("UNRESOLVED_")) or unresolved_flag:
-		print(f"HARD SOURCE ROUTING: Source '{source_hint}' is unresolved. Returning 0 candidate chunks to prevent cross-source fallback.")
+		if DEBUG:
+			print(f"HARD SOURCE ROUTING: Source '{source_hint}' is unresolved. Returning 0 candidate chunks to prevent cross-source fallback.")
 		return []
 
 	candidate_rows = []
@@ -219,7 +223,8 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 			resolved_source = os.path.basename(candidate_rows[0]["path"])
 		else:
 			source_exists = False
-			print(f"HARD SOURCE ROUTING: Source '{source_hint}' exists but yielded 0 usable chunks. Zero fallback.")
+			if DEBUG:
+				print(f"HARD SOURCE ROUTING: Source '{source_hint}' exists but yielded 0 usable chunks. Zero fallback.")
 			return []
 	elif preferred_set:
 		# For non-source-specific queries with preferences, use preferred_set
@@ -372,7 +377,8 @@ def search_images(image_path, max_results=10):
 	image_table=get_image_table()
 
 	if image_table is None:
-		print("Image table is not available")
+		if DEBUG:
+			print("Image table is not available")
 		return []
 
 	#Generate 512-D CLIP embedding for query image
@@ -387,11 +393,12 @@ def search_images(image_path, max_results=10):
 			.to_list()
 	)
 
-	print("\nImage Query: ",image_path)
-	print("Relevant images: ", len(results))
+	if DEBUG:
+		print("\nImage Query: ",image_path)
+		print("Relevant images: ", len(results))
 
-	for result in results:
-		print("Source: ",os.path.basename(result['path']))
+		for result in results:
+			print("Source: ",os.path.basename(result['path']))
 	return results	
 
 #-------Image Search by text--------
@@ -401,7 +408,8 @@ def search_images_by_text(question, max_results=5):
 	image_table=get_image_table()
 
 	if image_table is None:
-		print("Image table is not available.")
+		if DEBUG:
+			print("Image table is not available.")
 		return []
 
 	#Generate 512-D CLIP text embedding
@@ -423,17 +431,19 @@ def search_images_by_text(question, max_results=5):
 	# 	if (is_image_query and dist < 0.85) or (not is_image_query and dist < 0.55):
 	# 		filtered_results.append(res)
 
-	print("\nImage Text Query: ", question)
-	print("Relevant Images: ", len(filtered_results))
+	if DEBUG:
+		print("\nImage Text Query: ", question)
+		print("Relevant Images: ", len(filtered_results))
 
-	for result in results:
-		print("Source: ", os.path.basename(result['path']))
+		for result in results:
+			print("Source: ", os.path.basename(result['path']))
 	return results		
 
 
 def get_full_transcript_for_source(source_path):
 	"""
 	Retrieves ALL transcript chunks for a source file from LanceDB documents table in original sequence order.
+	Validates completeness (retrieved == expected) and sorts by chunk sequence index.
 	Strips chunk header prefixes, deduplicates repeating ASR loops, removes chunk overlap duplication, and reconstructs the clean transcript.
 	Returns tuple: (reconstructed_transcript_text, chunk_count)
 	"""
@@ -458,6 +468,19 @@ def get_full_transcript_for_source(source_path):
 	if not matching_rows:
 		return "", 0
 
+	expected_chunks = len(matching_rows)
+
+	# Helper function to extract numerical sequence index from chunk_id for deterministic sequence ordering
+	def extract_chunk_sequence_index(row_item):
+		c_id = str(row_item.get("chunk_id", ""))
+		digits = re.findall(r"\d+", c_id)
+		if digits:
+			return int(digits[-1])
+		return 0
+
+	# Sort matching rows deterministically by sequence index
+	matching_rows.sort(key=extract_chunk_sequence_index)
+
 	cleaned_chunks = []
 	for row in matching_rows:
 		text = str(row.get("text", ""))
@@ -466,6 +489,11 @@ def get_full_transcript_for_source(source_path):
 			if len(parts) > 1:
 				text = parts[1]
 		cleaned_chunks.append(text.strip())
+
+	# Validate completeness: retrieved chunks must equal expected chunks
+	if len(cleaned_chunks) != expected_chunks:
+		if DEBUG:
+			print(f"CHUNK VALIDATION WARN: Retrieved {len(cleaned_chunks)} chunks, expected {expected_chunks}")
 
 	# Deduplicate adjacent chunk overlaps (e.g. trailing words of Chunk N matching leading words of Chunk N+1)
 	reconstructed_parts = []
@@ -502,7 +530,7 @@ def get_full_transcript_for_source(source_path):
 	# Clean repeating ASR hallucination lines, phrase loops, and Hindi filler loops
 	from app.services.speech_to_text import clean_asr_hallucination_loops
 	reconstructed_transcript = clean_asr_hallucination_loops(combined_raw)
-	return reconstructed_transcript, len(matching_rows)
+	return reconstructed_transcript, expected_chunks
 
 
 def get_stored_ocr_text_for_image(source_path):
