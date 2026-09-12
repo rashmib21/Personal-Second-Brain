@@ -52,7 +52,8 @@ def run_single_regression_test(test_num, question, expected_source, expected_int
         print(f"- sorted result: Newest first")
 
     elif modality == "audio" or (resolved_source and resolved_source.endswith((".m4a", ".mp3", ".wav", ".mpeg"))):
-        full_transcript, total_chunks = get_full_transcript_for_source(canonical_source) if canonical_source else ("", 0)
+        res_ft = get_full_transcript_for_source(canonical_source) if canonical_source else ("", 0, {})
+        full_transcript, total_chunks = res_ft[0], res_ft[1]
         print("\nAUDIO:")
         print(f"- ASR output snippet: {full_transcript[:150]}...")
         print(f"- chunk count: {total_chunks}")

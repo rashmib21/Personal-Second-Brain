@@ -200,6 +200,39 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
         if candidate.lower() in question_lower:
             return candidate, 1.0
 
+    # Stage 1.5: Natural Stem Sub-phrase Matching
+    # Check if a multi-word or single-word entity phrase from the query matches candidate filename stems as a sub-phrase
+    # Example: "SQL notes" matches stem "SQLNotesForProfessionals" -> "sql notes for professionals"
+    natural_stem_matches = []
+    for candidate in candidate_files:
+        file_stem = os.path.splitext(candidate)[0]
+        normalized_stem = normalize_string(file_stem)
+
+        # Split stem words, ignoring generic prepositions
+        stem_words = [w for w in normalized_stem.split() if w not in {"a", "an", "the", "of", "in", "for", "to", "and", "or", "is", "by", "with", "on", "at"}]
+
+        if len(stem_words) >= 1:
+            for sub_len in range(len(stem_words), 0, -1):
+                for start_idx in range(len(stem_words) - sub_len + 1):
+                    sub_phrase = " ".join(stem_words[start_idx : start_idx + sub_len])
+                    if len(sub_phrase) >= 3 and sub_phrase not in GENERIC_MEDIA_TERMS:
+                        boundary_pattern = r"\b" + re.escape(sub_phrase) + r"\b"
+                        if re.search(boundary_pattern, normalized_question):
+                            natural_stem_matches.append((sub_len, len(sub_phrase), candidate))
+                            break
+
+    if natural_stem_matches:
+        natural_stem_matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        top_sub_len = natural_stem_matches[0][0]
+        top_sub_char_len = natural_stem_matches[0][1]
+
+        top_candidates = list(set([m[2] for m in natural_stem_matches if m[0] == top_sub_len and m[1] == top_sub_char_len]))
+
+        if len(top_candidates) == 1:
+            return top_candidates[0], 0.95
+        elif len(top_candidates) > 1:
+            return top_candidates, 0.60
+
     # Stage 2: Entity Token Matching (Exact + Fuzzy Match)
     question_entity_tokens = extract_entity_tokens(question_lower)
 
@@ -224,8 +257,9 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
                     if len(q_token) >= 4 and len(s_token) >= 4:
                         if similarity >= 0.70:
                             best_token_score = max(best_token_score, similarity)
-                    elif (len(q_token) >= 2 and q_token in s_token) or (len(s_token) >= 2 and s_token in q_token):
-                        best_token_score = max(best_token_score, 0.85)
+                    elif len(q_token) >= 3 and len(s_token) >= 3 and (q_token in s_token or s_token in q_token):
+                        if q_token not in GENERIC_MEDIA_TERMS and s_token not in GENERIC_MEDIA_TERMS:
+                            best_token_score = max(best_token_score, 0.85)
 
             if best_token_score >= 0.70:
                 scored_candidates.append((best_token_score, exact_match_count, candidate))
@@ -269,6 +303,16 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
 
     if best_exact_match:
         return best_exact_match, 0.95
+
+    # Stage 3.5: Media Stem Keyword Fallback (e.g. 'con call' or 'call' matching 'Behari_lal_call.m4a')
+    if query_modality == "audio" or "call" in question_lower or "recording" in question_lower:
+        call_matches = []
+        for candidate in candidate_files:
+            file_stem = os.path.splitext(candidate)[0].lower()
+            if ("call" in question_lower and "call" in file_stem) or ("recording" in question_lower and "recording" in file_stem):
+                call_matches.append(candidate)
+        if len(call_matches) == 1:
+            return call_matches[0], 0.90
 
     # Stage 4: Substring Fallback for compact stems
     for candidate in candidate_files:
@@ -397,7 +441,19 @@ def resolve_semantic_source(question_lower, indexed_files, query_modality="all")
                 overlap_count = sum(1 for qt in q_tokens if any(qt == st or (len(qt) >= 2 and qt in st) for st in stem_tokens))
                 name_overlap_score = overlap_count / len(q_tokens)
 
+            # Check if query contains explicit entity noun tokens absent from candidate stem (e.g. 'physics' in query vs 'SQLNotes' candidate)
+            has_conflicting_entity = False
+            if q_tokens and stem_tokens:
+                for qt in q_tokens:
+                    if len(qt) >= 4 and qt not in GENERIC_MEDIA_TERMS:
+                        if not any(qt in st or st in qt for st in stem_tokens):
+                            has_conflicting_entity = True
+                            break
+
             final_file_score = 0.50 * chunk_score + 0.35 * name_overlap_score + 0.15 * (1.0 if chunk_score > 0 else 0.0)
+            if has_conflicting_entity:
+                final_file_score *= 0.3
+
             aggregated_scores.append((f_base, final_file_score))
 
         aggregated_scores.sort(key=lambda item: item[1], reverse=True)
@@ -508,21 +564,26 @@ def analyze_query(question, indexed_files=None):
 
     file_list_patterns = [
         r"\blist\s+(?:all\s+)?files?\b", r"\bshow\s+(?:all\s+)?files?\b", r"\blist\s+(?:all\s+)?images?\b", r"\bshow\s+(?:all\s+)?images?\b",
+        r"\blist\s+(?:all\s+)?photos?\b", r"\bshow\s+(?:all\s+)?photos?\b", r"\blist\s+(?:all\s+)?pictures?\b", r"\bshow\s+(?:all\s+)?pictures?\b",
         r"\blist\s+(?:all\s+)?audio\b", r"\bshow\s+(?:all\s+)?audio\b", r"\blist\s+(?:all\s+)?documents?\b", r"\bshow\s+(?:all\s+)?documents?\b",
-        r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\b.*\b(?:files?|images?|audio|recordings?|documents?)\b",
-        r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\baudio\s+added\b", r"\brecordings?\s+added\b",
+        r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\s+photos?\b", r"\bwhich\b.*\b(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
+        r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\bphotos?\s+added\b", r"\baudio\s+added\b", r"\brecordings?\s+added\b",
         r"\brecent\s+files?\b", r"\blatest\s+files?\b", r"\bnewest\s+files?\b", r"\bmost\s+recent\b",
         r"\brecently\s+added\b", r"\bnewly\s+added\b", r"\bdate-wise\b", r"\bdatewise\b", r"\bby\s+date\b",
-        r"\b(?:top|latest|recent|first)\s+\d+\s*(?:files?|images?|audio|recordings?|documents?)\b",
-        r"\b\d+\s+(?:recent|latest)\s+(?:files?|images?|audio|recordings?|documents?)\b",
-        r"\bwhat\s+(?:audio\s+)?files\b", r"\bnames?\s+of\s+(?:my\s+)?(?:audio\s+)?files?\b",
-        r"\brecordings?\s+in\s+(?:my\s+)?folder\b", r"\bshow\s+(?:me\s+)?(?:all\s+)?audio\s+recordings?\b",
-        r"\bshow\s+(?:every\s+)?sound\s+file\b", r"\ball\s+audio\s+recordings?\b"
+        r"\b(?:top|latest|recent|first)\s+\d+\s*(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
+        r"\b\d+\s+(?:recent|latest)\s+(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
+        r"\bwhat\s+(?:audio\s+|image\s+|photo\s+)?files\b", r"\bwhat\s+files\s+(?:are\s+in|do\s+i\s+have)\b",
+        r"\bnames?\s+of\s+(?:my\s+)?(?:audio\s+|image\s+|photo\s+)?files?\b",
+        r"\brecordings?\s+in\s+(?:my\s+)?folder\b", r"\bfiles?\s+in\s+(?:my\s+)?folder\b",
+        r"\bshow\s+(?:me\s+)?(?:all\s+)?audio\s+recordings?\b", r"\bshow\s+(?:every\s+)?sound\s+file\b", r"\ball\s+audio\s+recordings?\b"
     ]
     is_file_list_query = any(re.search(pat, question_lower) for pat in file_list_patterns) or (start_dt is not None)
 
     count_temporal_patterns = [
-        r"\bhow\s+many\s+files\b", r"\bhow\s+many\s+images\b", r"\bhow\s+many\s+audio\b", r"\bcount\s+of\s+files\b"
+        r"\bhow\s+many\s+files\b", r"\bhow\s+many\s+images\b", r"\bhow\s+many\s+photos\b",
+        r"\bhow\s+many\s+pictures\b", r"\bhow\s+many\s+audio\b", r"\bhow\s+many\s+recordings\b",
+        r"\bhow\s+many\s+documents\b", r"\bcount\s+of\s+files\b", r"\bcount\s+of\s+images\b",
+        r"\bcount\s+of\s+photos\b", r"\bcount\s+of\s+audio\b"
     ]
     is_count_temporal_query = any(re.search(pat, question_lower) for pat in count_temporal_patterns)
 
@@ -561,10 +622,10 @@ def analyze_query(question, indexed_files=None):
 
     # Step 3: Modality & File Type Categorization
     modality = "all"
-    audio_keywords = ["audio", "sound", "m4a", "mp3", "wav", "mpeg", "recording", "speaker", "speak", "voice", "con call", "talk"]
+    audio_keywords = ["audio", "sound", "sounds", "m4a", "mp3", "wav", "mpeg", "recording", "recordings", "speaker", "speak", "voice", "con call", "talk"]
     image_keywords = ["image", "images", "picture", "pictures", "photo", "photos", "visual", "diagram", "chart", "figure", "jpg", "jpeg", "png", "webp"]
     pdf_keywords = ["pdf", "pdfs"]
-    doc_keywords = ["docx", "doc", "document", "documents"]
+    doc_keywords = ["docx", "doc", "document", "documents", "paper", "papers", "notes", "note", "sheet", "sheets"]
     video_keywords = ["video", "videos", "mp4", "mkv", "avi", "mov"]
 
     if any(kw in question_lower for kw in audio_keywords):
@@ -600,7 +661,11 @@ def analyze_query(question, indexed_files=None):
 
         if source_hint is None:
             source_match, confidence = find_best_matching_source(question_lower, indexed_files, query_modality=modality)
-            if source_match and confidence >= 0.70:
+            if isinstance(source_match, list):
+                is_ambiguous_source = True
+                ambiguous_candidate_sources = source_match
+                source_confidence = confidence
+            elif source_match and confidence >= 0.70:
                 source_hint = source_match
                 source_confidence = confidence
 
@@ -610,7 +675,8 @@ def analyze_query(question, indexed_files=None):
         "audio of", "in file", "the file", "image of", "recording of", "file", "audio", "image",
         "notes of", "the notes", "notes", "note", "document of", "the document", "document", "doc", "docs",
         "paper of", "the paper", "paper", "sheet of", "the sheet", "sheet", "summary of", "overview of",
-        "contents of", "transcript of", "summarize", "summarise", "summary", "overview", "translate"
+        "contents of", "transcript of", "summarize", "summarise", "summary", "overview", "translate",
+        "in my", "from my", "from the", "in the"
     ]
     has_source_phrase = any(ind in question_lower for ind in source_phrase_indicators)
 
@@ -641,8 +707,27 @@ def analyze_query(question, indexed_files=None):
                 source_confidence = 0.8
             canonical_source_id = resolve_canonical_source_id(source_hint)
 
+    # Check if query explicitly specifies a source entity (e.g. "physics notes", "chemistry doc") that is missing from index
+    has_unindexed_explicit_entity = False
+    target_unindexed_entity = None
+    if has_source_phrase and entity_tokens and source_hint is None and not has_anaphora:
+        for et in entity_tokens:
+            if len(et) >= 3 and et not in GENERIC_MEDIA_TERMS:
+                # Check if this entity token matches any indexed file stem
+                if indexed_files and not any(et in f.lower() for f in indexed_files):
+                    has_unindexed_explicit_entity = True
+                    target_unindexed_entity = et
+                    break
+
+    if has_unindexed_explicit_entity and source_hint is None:
+        if modality == "audio" or "audio" in question_lower:
+            source_hint = "UNRESOLVED_AUDIO_SOURCE"
+        else:
+            source_hint = f"UNRESOLVED_SOURCE_{target_unindexed_entity.upper()}"
+        unresolved_explicit_source = True
+
     ambiguous_candidate_sources = []
-    if source_hint is None and not has_anaphora and temporal_intent == "none":
+    if source_hint is None and not has_anaphora and temporal_intent == "none" and not unresolved_explicit_source:
         top_src, top_score, second_score, candidate_list = resolve_semantic_source(question_lower, indexed_files, query_modality=modality)
         if top_src and top_score >= 0.55 and (top_score - second_score) >= 0.12:
             source_hint = top_src
@@ -651,7 +736,7 @@ def analyze_query(question, indexed_files=None):
             is_ambiguous_source = True
             ambiguous_candidate_sources = candidate_list
 
-    if source_hint is None and temporal_intent == "none" and not is_ambiguous_source:
+    if source_hint is None and temporal_intent == "none" and not is_ambiguous_source and not unresolved_explicit_source:
         if has_source_phrase and len(entity_tokens) > 0:
             target_entity = entity_tokens[0]
             if modality == "audio" or "audio" in question_lower:
@@ -732,7 +817,7 @@ def analyze_query(question, indexed_files=None):
     ]
     is_image_summary_query = any(isp in question_lower for isp in image_summary_phrases)
 
-    # Generic detection for full-source transcript and full-source translation requests
+    # Generic detection for full-source transcript, complete content, and full-source translation requests
     full_source_patterns = [
         r"\ball\s+(?:the\s+)?text\b", r"\bcomplete\s+(?:the\s+)?transcript\b",
         r"\bcomplete\s+(?:the\s+)?text\b", r"\bfull\s+text\b", r"\bcomplete\s+document\b",
@@ -740,7 +825,10 @@ def analyze_query(question, indexed_files=None):
         r"\bentire\s+transcript\b", r"\bfull\s+transcript\b", r"\bentire\s+audio\b",
         r"\ball\s+of\s+the\s+audio\b", r"\bcomplete\s+audio\b", r"\bfull\s+content\b",
         r"\bcomplete\s+content\b", r"\beverything\s+said\b", r"\beverything\s+in\b",
-        r"\bwhole\s+text\b", r"\bwhole\s+transcript\b", r"\bconvert\s+all\b", r"\btranslate\s+all\b",
+        r"\beverything\s+from\b", r"\ball\s+(?:the\s+)?chapters?\b", r"\blist\s+all\s+chapters?\b",
+        r"\ball\s+(?:the\s+)?sections?\b", r"\ball\s+(?:the\s+)?pages?\b", r"\bentire\s+book\b",
+        r"\bentire\s+file\b", r"\bentire\s+paper\b", r"\bwhole\s+text\b", r"\bwhole\s+transcript\b",
+        r"\bwhole\s+book\b", r"\bwhole\s+file\b", r"\bconvert\s+all\b", r"\btranslate\s+all\b",
         r"\btranslate\s+(?:the\s+)?entire\b", r"\bconvert\s+(?:the\s+)?entire\b",
         r"\btranslate\s+(?:the\s+)?whole\b", r"\bconvert\s+(?:the\s+)?whole\b",
         r"\btranslate\s+everything\b", r"\bconvert\s+everything\b",
@@ -877,10 +965,18 @@ def analyze_query(question, indexed_files=None):
     }
     
     # Generic semantic check for summarization synonyms to prevent phrase-sensitivity
-    summary_synonyms = ["summarize", "summarise", "summary", "overview", "synopsis", "tldr", "brief", "main points", "key takeaways", "what was discussed", "kya baatein", "kya discuss", "details of call"]
+    summary_synonyms = [
+        "summarize", "summarise", "summary", "overview", "synopsis", "tldr", "brief",
+        "main points", "key takeaways", "what was discussed", "what is covered", "what was covered",
+        "what's covered", "what is in", "what's in", "walk me through", "outline",
+        "kya baatein", "kya discuss", "details of call"
+    ]
     is_generic_summary = any(syn in question_lower for syn in summary_synonyms)
 
-    if is_generic_summary and intent == INTENT_TEXT_SEARCH:
+    if request_scope == "complete_file":
+        target_intent_enum = QueryIntent.FULL_CONTENT_FETCH
+        target_scope_enum = RequestScope.COMPLETE_FILE
+    elif is_generic_summary and intent == INTENT_TEXT_SEARCH and not has_partial_topic_indicator:
         target_intent_enum = QueryIntent.SUMMARIZATION
         target_scope_enum = RequestScope.SUMMARY
     else:
