@@ -82,11 +82,14 @@ def validate_content_grounding(context_text, answer_text, question="", source_pa
     return (len(unsupported) == 0), unsupported
 
 
-def handle_temporal_query(question, analysis):
+def handle_temporal_query(question, analysis, plan_modality=None, plan_start_dt=None, plan_end_dt=None, plan_date_label=None, plan_limit=None):
     """
     Handles file listing, temporal file queries, and file count queries deterministically
     by querying the LanceDB processed_files metadata table directly without LLM invocation.
     Supports dynamic date parsing, modality filtering, limit extraction, and deduplication.
+
+    Accepts optional plan_* kwargs from QueryPlan.filters to override raw analysis dict values.
+    This ensures the QueryPlan is the authoritative source of truth for filter parameters.
     """
     from datetime import datetime
     from app.query.query_analyzer import INTENT_FILE_COUNT, INTENT_FILE_LIST, INTENT_TEMPORAL_FILE_QUERY
@@ -100,14 +103,15 @@ def handle_temporal_query(question, analysis):
     if database_dataframe.empty or "path" not in database_dataframe.columns:
         return "No files have been added to the Second Brain database.", [], 0
 
-    # Step 2: Extract classification metadata from analysis dictionary
-    modality = analysis.get("modality", "all")
+    # Step 2: Extract classification metadata.
+    # Plan-derived values take precedence over raw analysis dict values.
+    modality = plan_modality if plan_modality is not None else analysis.get("modality", "all")
     intent = analysis.get("intent", "TEMPORAL_FILE_QUERY")
     temporal_intent = analysis.get("temporal_intent", "none")
-    start_datetime = analysis.get("start_datetime")
-    end_datetime = analysis.get("end_datetime")
-    date_label = analysis.get("date_label")
-    extracted_limit = analysis.get("extracted_limit")
+    start_datetime = plan_start_dt if plan_start_dt is not None else analysis.get("start_datetime")
+    end_datetime = plan_end_dt if plan_end_dt is not None else analysis.get("end_datetime")
+    date_label = plan_date_label if plan_date_label is not None else analysis.get("date_label")
+    extracted_limit = plan_limit if plan_limit is not None else analysis.get("extracted_limit")
 
     # Step 3: Define modality file extension filters
     audio_extensions = (".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac", ".ogg")
@@ -859,8 +863,10 @@ def ask(question, return_structured=False):
         elif person_name and person_name.lower() not in related_synonyms:
             is_person_verification_query = True
 
-    is_explicit_image_retrieval = (intent == "image_retrieval") or is_image_list_query(question) or any(
-        p in question_lower for p in ["show image", "find image", "get image", "list images", "show me"]
+    is_explicit_image_retrieval = (
+        (intent == "image_retrieval") or
+        is_image_list_query(question) or
+        any(p in question_lower for p in ["show image", "find image", "get image", "list images", "show me", "display", "picture", "photo", "image of"])
     ) and not any(w in question_lower for w in ["what is in", "content of", "summarize", "text", "names in"])
 
     # ROUTE BRANCH 1: Source-Based Image Retrieval
@@ -951,7 +957,7 @@ def ask(question, return_structured=False):
             return ans_str, sources, len(sources)
 
     # Step 4: Handle Visual Question Answering & Image Summary/QA
-    if intent in ["IMAGE_SUMMARY", "IMAGE_VISUAL_QUERY", "image_summary"] or (modality == "image" and source_hint):
+    if intent in ["IMAGE_SUMMARY", "IMAGE_VISUAL_QUERY", "image_summary"] or (is_visual_qa and modality == "image" and source_hint):
         target_img = resolved_source_path
         if not target_img or not os.path.exists(target_img):
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

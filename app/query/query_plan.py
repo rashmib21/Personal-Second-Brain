@@ -8,11 +8,14 @@ from datetime import datetime
 class QueryIntent(str, Enum):
     """
     Core semantic intents supported by the RAG architecture.
+    IMAGE_DISPLAY: user wants to see/retrieve an image (not describe/analyse it).
+    VISUAL_QA: user wants the image described, OCR'd, or visually analysed.
     """
     METADATA_QUERY = "METADATA_QUERY"
     FULL_CONTENT_FETCH = "FULL_CONTENT_FETCH"
     SUMMARIZATION = "SUMMARIZATION"
     SPEAKER_ANALYSIS = "SPEAKER_ANALYSIS"
+    IMAGE_DISPLAY = "IMAGE_DISPLAY"
     VISUAL_QA = "VISUAL_QA"
     FACE_OPERATIONS = "FACE_OPERATIONS"
     QUESTION_ANSWERING = "QUESTION_ANSWERING"

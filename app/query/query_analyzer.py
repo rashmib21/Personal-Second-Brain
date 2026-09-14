@@ -568,10 +568,10 @@ def analyze_query(question, indexed_files=None):
         r"\blist\s+(?:all\s+)?audio\b", r"\bshow\s+(?:all\s+)?audio\b", r"\blist\s+(?:all\s+)?documents?\b", r"\bshow\s+(?:all\s+)?documents?\b",
         r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\s+photos?\b", r"\bwhich\b.*\b(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
         r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\bphotos?\s+added\b", r"\baudio\s+added\b", r"\brecordings?\s+added\b",
-        r"\brecent\s+files?\b", r"\blatest\s+files?\b", r"\bnewest\s+files?\b", r"\bmost\s+recent\b",
+        r"\brecent\s+files?\b", r"\blatest\s+files?\b", r"\bnewest\s+files?\b", r"\bmost\s+recent\b", r"\blast\s+files?\b",
         r"\brecently\s+added\b", r"\bnewly\s+added\b", r"\bdate-wise\b", r"\bdatewise\b", r"\bby\s+date\b",
-        r"\b(?:top|latest|recent|first)\s+\d+\s*(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
-        r"\b\d+\s+(?:recent|latest)\s+(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
+        r"\b(?:top|latest|recent|first|last)\s+\d+\s*(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
+        r"\b\d+\s+(?:recent|latest|last)\s+(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
         r"\bwhat\s+(?:audio\s+|image\s+|photo\s+)?files\b", r"\bwhat\s+files\s+(?:are\s+in|do\s+i\s+have)\b",
         r"\bnames?\s+of\s+(?:my\s+)?(?:audio\s+|image\s+|photo\s+)?files?\b",
         r"\brecordings?\s+in\s+(?:my\s+)?folder\b", r"\bfiles?\s+in\s+(?:my\s+)?folder\b",
@@ -601,7 +601,7 @@ def analyze_query(question, indexed_files=None):
     question_without_date_words = re.sub(r"\b\d{4}\b", "", question_without_date_words)
 
     explicit_limit_match = re.search(
-        r"\b(?:top|latest|recent|first)\s+(\d{1,2})\b|\b(\d{1,2})\s+(?:recent|latest|files?|images?|audio|documents?)\b",
+        r"\b(?:top|latest|recent|first|last)\s+(\d{1,2})\b|\b(\d{1,2})\s+(?:recent|latest|last|files?|images?|audio|documents?)\b",
         question_without_date_words
     )
     extracted_limit = None
@@ -611,7 +611,7 @@ def analyze_query(question, indexed_files=None):
             extracted_limit = int(number_string)
 
     # Default limit to 5 if user asked for recent/latest files without specifying an explicit limit
-    if extracted_limit is None and any(word in question_lower for word in ["recent", "latest", "newest"]):
+    if extracted_limit is None and any(word in question_lower for word in ["recent", "latest", "newest", "last"]):
         extracted_limit = 5
 
     temporal_intent = "none"
@@ -672,7 +672,6 @@ def analyze_query(question, indexed_files=None):
     # Detect if query has explicit source/entity reference that failed resolution
     entity_tokens = extract_entity_tokens(question_lower)
     source_phrase_indicators = [
-        "audio of", "in file", "the file", "image of", "recording of", "file", "audio", "image",
         "notes of", "the notes", "notes", "note", "document of", "the document", "document", "doc", "docs",
         "paper of", "the paper", "paper", "sheet of", "the sheet", "sheet", "summary of", "overview of",
         "contents of", "transcript of", "summarize", "summarise", "summary", "overview", "translate",
@@ -680,12 +679,15 @@ def analyze_query(question, indexed_files=None):
     ]
     has_source_phrase = any(ind in question_lower for ind in source_phrase_indicators)
 
-    # Anaphora & Conversational Context Resolution for vague source references ("it", "this file", "the recording")
+    # Anaphora & Conversational Context Resolution.
+    # Only true pronouns / deictic references trigger history lookup.
+    # Generic media descriptions like "the call" or "the recording" are NOT anaphora;
+    # they describe the category of file the user wants, not a specific previous reference.
     anaphora_indicators = [
-        r"\bit\b", r"\bthis\s+file\b", r"\bthat\s+file\b", r"\bthe\s+file\b",
-        r"\bthis\s+audio\b", r"\bthe\s+audio\b", r"\bthis\s+recording\b", r"\bthe\s+recording\b",
-        r"\bthis\s+document\b", r"\bthe\s+document\b", r"\bthis\s+image\b", r"\bthe\s+image\b",
-        r"\bthis\s+call\b", r"\bthe\s+call\b", r"\bthis\s+transcript\b", r"\bthe\s+transcript\b"
+        r"\bit\b",
+        r"\bthis\s+file\b", r"\bthat\s+file\b", r"\bthe\s+file\b",
+        r"\bthis\s+document\b", r"\bthat\s+document\b",
+        r"\bthis\s+one\b", r"\bthat\s+one\b",
     ]
     has_anaphora = any(re.search(pat, question_lower) for pat in anaphora_indicators)
 
@@ -726,8 +728,10 @@ def analyze_query(question, indexed_files=None):
             source_hint = f"UNRESOLVED_SOURCE_{target_unindexed_entity.upper()}"
         unresolved_explicit_source = True
 
+    # Semantic source resolution (only if no explicit unresolved source).
+    # Guard: never run semantic source lookup when source is already confirmed unresolvable.
     ambiguous_candidate_sources = []
-    if source_hint is None and not has_anaphora and temporal_intent == "none" and not unresolved_explicit_source:
+    if source_hint is None and not unresolved_explicit_source and not has_anaphora and temporal_intent == "none":
         top_src, top_score, second_score, candidate_list = resolve_semantic_source(question_lower, indexed_files, query_modality=modality)
         if top_src and top_score >= 0.55 and (top_score - second_score) >= 0.12:
             source_hint = top_src
@@ -735,7 +739,7 @@ def analyze_query(question, indexed_files=None):
         elif top_src and top_score >= 0.45 and (top_score - second_score) < 0.12 and len(candidate_list) > 1:
             is_ambiguous_source = True
             ambiguous_candidate_sources = candidate_list
-
+    
     if source_hint is None and temporal_intent == "none" and not is_ambiguous_source and not unresolved_explicit_source:
         if has_source_phrase and len(entity_tokens) > 0:
             target_entity = entity_tokens[0]
@@ -800,6 +804,25 @@ def analyze_query(question, indexed_files=None):
         r"\bwho\s+speaks\b"
     ]
     is_speaker_query = any(re.search(pat, question_lower) for pat in speaker_patterns)
+
+    # Detect IMAGE_DISPLAY intent: user wants to retrieve/view/see an image, not describe it.
+    # Uses structural patterns (action verb + visual object) rather than a synonym list.
+    # Intentionally kept separate from VISUAL_QA (describe/analyse) and SUMMARIZATION.
+    image_display_patterns = [
+        r"\bshow\s+(?:me\s+)?(?:the\s+)?(?:image|photo|picture|pic)\b",
+        r"\bdisplay\s+(?:the\s+)?(?:image|photo|picture|pic)\b",
+        r"\bopen\s+(?:the\s+)?(?:image|photo|picture|pic)\b",
+        r"\blet\s+me\s+see\s+(?:the\s+)?(?:image|photo|picture|pic)\b",
+        r"\bi\s+want\s+to\s+see\s+(?:the\s+)?(?:image|photo|picture|pic)\b",
+        r"\bcan\s+(?:you\s+)?show\s+(?:me\s+)?(?:the\s+)?(?:image|photo|picture|pic)\b",
+        r"\bfetch\s+(?:the\s+)?(?:image|photo|picture|pic)\b",
+    ]
+    # Image display is only triggered when the modality resolves to image (avoids false positives
+    # on queries like "show me the audio" which belong to a different handler).
+    is_image_display_query = (
+        modality == "image"
+        and any(re.search(pat, question_lower) for pat in image_display_patterns)
+    )
 
     ocr_phrases = [
         "text in the image", "text in image", "what is the text", "read text",
@@ -880,10 +903,17 @@ def analyze_query(question, indexed_files=None):
     ]
     is_audio_summary_query = any(asp in question_lower for asp in audio_summary_phrases)
 
+    # Intent priority order:
+    # Correction > Metadata/Temporal > Image Display > Image Metadata > Speaker >
+    # Full Content / Translation > OCR > Image Summary > Audio Summary > Document Summary > Text Search
     if is_correction:
         intent = INTENT_CORRECTION
     elif temporal_intent != "none":
         intent = INTENT_TEMPORAL_FILE_QUERY
+    elif is_image_display_query:
+        # User wants to see/retrieve an image, not analyse it.
+        # Placed before image_filename and image_summary to avoid misclassification.
+        intent = "IMAGE_DISPLAY"
     elif is_image_filename_query:
         intent = INTENT_IMAGE_FILENAME_QUERY
     elif is_image_count_query:
@@ -912,12 +942,22 @@ def analyze_query(question, indexed_files=None):
     else:
         intent = INTENT_TEXT_SEARCH
 
+    visual_qa_keywords = [
+        "what is in", "what's in", "content of", "describe", "what color", "how many",
+        "what text", "read text", "explain image", "what does it look like"
+    ]
+    is_visual_qa = (
+        (modality == "image" and any(kw in question_lower for kw in visual_qa_keywords)) or
+        is_image_summary_query or
+        is_ocr_query
+    )
+
     analysis_result = {
         "intent": intent,
         "request_scope": request_scope,
         "temporal_intent": temporal_intent,
         "face_intent": "none",
-        "is_visual_qa": (modality == "image") or is_image_summary_query or is_ocr_query,
+        "is_visual_qa": is_visual_qa,
         "is_ocr_query": is_ocr_query,
         "is_image_summary_query": is_image_summary_query,
         "modality": modality,
@@ -957,8 +997,11 @@ def analyze_query(question, indexed_files=None):
         INTENT_AUDIO_SPEAKER_QUERY: QueryIntent.SPEAKER_ANALYSIS,
         INTENT_AUDIO_TRANSLATION: QueryIntent.FULL_CONTENT_FETCH,
         INTENT_AUDIO_TRANSCRIPT: QueryIntent.FULL_CONTENT_FETCH,
+        # IMAGE_DISPLAY is registered as a plain string because it is a new enum value.
+        # This mapping is the single place where it resolves to QueryIntent.IMAGE_DISPLAY.
+        "IMAGE_DISPLAY": QueryIntent.IMAGE_DISPLAY,
         INTENT_IMAGE_OCR: QueryIntent.VISUAL_QA,
-        INTENT_IMAGE_SUMMARY: QueryIntent.SUMMARIZATION if modality == "image" else QueryIntent.VISUAL_QA,
+        INTENT_IMAGE_SUMMARY: QueryIntent.VISUAL_QA if modality != "image" else QueryIntent.SUMMARIZATION,
         INTENT_AUDIO_SUMMARY: QueryIntent.SUMMARIZATION,
         INTENT_DOCUMENT_SUMMARY: QueryIntent.SUMMARIZATION,
         INTENT_TEXT_SEARCH: QueryIntent.QUESTION_ANSWERING

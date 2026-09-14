@@ -1,22 +1,18 @@
-import sys
 import os
 import shutil
 import logging
 from pathlib import Path
 from typing import Optional, List
 
-# Ensure project root is in sys.path when running app/server.py directly
-BASE_DIR = Path(__file__).resolve().parent.parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
 # Suppress HTTP request logs from external clients (httpx, httpcore, urllib3)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 # Import existing backend modules
 from app.rag.rag_pipeline import ask
@@ -36,32 +32,40 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 WATCHED_FOLDER = BASE_DIR / "watched_folder"
 WATCHED_FOLDER.mkdir(exist_ok=True)
 
-FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
-
-app = Flask(
-    __name__,
-    static_folder=str(FRONTEND_DIR),
-    static_url_path="/static"
+app = FastAPI(
+    title="Personal Second Brain API",
+    description="Multimodal AI RAG & Knowledge Management System",
+    version="2.0.0"
 )
 
-# Enable CORS for all origins and routes
-CORS(app, resources={r"/*": {"origins": "*"}})
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# Serve Frontend static files if directory exists
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+if FRONTEND_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
-@app.route("/", methods=["GET"])
-def read_index():
+@app.get("/")
+async def read_index():
     index_path = FRONTEND_DIR / "index.html"
     if index_path.exists():
-        return send_file(str(index_path))
-    return jsonify({"message": "Personal Second Brain API is running."}), 200
+        return FileResponse(str(index_path))
+    return {"message": "Personal Second Brain API is running."}
 
 
 # ==========================================
 # 1. SYSTEM STATS & STATUS
 # ==========================================
 
-@app.route("/api/stats", methods=["GET"])
-def get_system_stats():
+@app.get("/api/stats")
+async def get_system_stats():
     """Returns database metrics and backend service statuses."""
     try:
         t_chunks = total_chunks()
@@ -88,45 +92,44 @@ def get_system_stats():
             "images_indexed": t_images,
             "faces_indexed": t_faces,
         }
-        return jsonify(status), 200
-    except Exception as error_exception:
-        return jsonify({"detail": str(error_exception)}), 500
+        return JSONResponse(content=status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ==========================================
 # 2. CHAT & RAG PIPELINE
 # ==========================================
 
-@app.route("/api/chat", methods=["POST"])
-def chat_endpoint():
+@app.post("/api/chat")
+async def chat_endpoint(payload: dict):
     """
     Executes the multimodal RAG pipeline for a user question.
     Expected payload: {"question": "..."}
     """
-    payload = request.get_json(silent=True) or {}
-    question_text = payload.get("question", "").strip()
-    if not question_text:
-        return jsonify({"detail": "Question cannot be empty."}), 400
+    question = payload.get("question", "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     try:
-        response_data = ask(question_text, return_structured=True)
-        return jsonify(response_data), 200
-    except Exception as error_exception:
-        return jsonify({"detail": f"RAG Error: {str(error_exception)}"}), 500
+        res = ask(question, return_structured=True)
+        return JSONResponse(content=res)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG Error: {str(e)}")
 
 
 # ==========================================
 # 3. FILE MANAGEMENT & MEDIA SERVING
 # ==========================================
 
-@app.route("/api/files", methods=["GET"])
-def list_files():
+@app.get("/api/files")
+async def list_files():
     """Lists all indexed files stored in LanceDB processed_files hash table."""
     try:
         htable = get_hash_table()
         df = htable.to_pandas()
         if df.empty:
-            return jsonify({"files": []}), 200
+            return JSONResponse(content={"files": []})
         
         records = df.to_dict(orient="records")
         # Format response
@@ -160,13 +163,13 @@ def list_files():
                 "created_at": r.get("created_at")
             })
 
-        return jsonify({"files": files}), 200
-    except Exception as error_exception:
-        return jsonify({"detail": str(error_exception)}), 500
+        return JSONResponse(content={"files": files})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route("/api/media/<path:file_path>", methods=["GET"])
-def serve_media(file_path: str):
+@app.get("/api/media/{file_path:path}")
+async def serve_media(file_path: str):
     """
     Serves images, audio, video, or documents directly to the UI.
     """
@@ -180,47 +183,43 @@ def serve_media(file_path: str):
         if alt_path.exists():
             path_obj = alt_path
         else:
-            return jsonify({"detail": f"File not found: {file_path}"}), 404
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
-    return send_file(str(path_obj))
+    return FileResponse(str(path_obj))
 
 
-@app.route("/api/upload", methods=["POST"])
-def upload_file():
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
     """Uploads a file to watched_folder and indexes it immediately."""
     try:
-        uploaded_file = request.files.get("file")
-        if not uploaded_file or not uploaded_file.filename:
-            return jsonify({"detail": "No file uploaded."}), 400
-
-        filename = uploaded_file.filename
-        dest_path = WATCHED_FOLDER / filename
-        uploaded_file.save(str(dest_path))
+        dest_path = WATCHED_FOLDER / file.filename
+        with dest_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
         # Trigger immediate extraction & indexing
         result = extract_file(str(dest_path))
-        return jsonify({
+        return JSONResponse(content={
             "status": "SUCCESS",
-            "filename": filename,
+            "filename": file.filename,
             "path": str(dest_path),
             "result": result
-        }), 200
-    except Exception as error_exception:
-        return jsonify({"detail": f"Upload processing failed: {str(error_exception)}"}), 500
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload processing failed: {str(e)}")
 
 
 # ==========================================
 # 4. FACE MEMORY APIs
 # ==========================================
 
-@app.route("/api/faces", methods=["GET"])
-def get_faces():
+@app.get("/api/faces")
+async def get_faces():
     """Lists registered face memory identities and all detected face records."""
     try:
         ftable = get_face_table()
         df = ftable.to_pandas()
         if df.empty:
-            return jsonify({"faces": [], "persons": []}), 200
+            return JSONResponse(content={"faces": [], "persons": []})
 
         records = df.to_dict(orient="records")
         persons = list(set(df["person_name"].dropna().tolist()))
@@ -245,51 +244,52 @@ def get_faces():
                 "created_at": str(r.get("created_at"))
             })
 
-        return jsonify({
+        return JSONResponse(content={
             "faces": formatted_faces,
             "persons": persons
-        }), 200
-    except Exception as error_exception:
-        return jsonify({"detail": str(error_exception)}), 500
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route("/api/faces/register", methods=["POST"])
-def register_face_endpoint():
+@app.post("/api/faces/register")
+async def register_face_endpoint(
+    person_name: str = Form(...),
+    image_path: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None)
+):
     """
     Registers a reference face for a person given an image path or uploaded file.
     """
     try:
-        person_name = request.form.get("person_name")
-        image_path = request.form.get("image_path")
-        uploaded_file = request.files.get("file")
-
         target_path = image_path
-        if uploaded_file and uploaded_file.filename:
-            dest_path = WATCHED_FOLDER / uploaded_file.filename
-            uploaded_file.save(str(dest_path))
+        if file:
+            dest_path = WATCHED_FOLDER / file.filename
+            with dest_path.open("wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
             target_path = str(dest_path)
 
-        if not target_path or not person_name:
-            return jsonify({"detail": "Either image_path or file must be provided along with person_name."}), 400
+        if not target_path:
+            raise HTTPException(status_code=400, detail="Either image_path or file must be provided.")
 
         result = register_face(person_name=person_name, image_path=target_path)
-        return jsonify(result), 200
-    except Exception as error_exception:
-        return jsonify({"detail": str(error_exception)}), 500
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ==========================================
 # 5. AUDIO & VIDEO SPECIFIC APIs
 # ==========================================
 
-@app.route("/api/audio", methods=["GET"])
-def get_audio_files():
+@app.get("/api/audio")
+async def get_audio_files():
     """Returns all processed audio files with their transcript snippets."""
     try:
         doc_table = get_table()
         df = doc_table.to_pandas()
         if df.empty:
-            return jsonify({"audio": []}), 200
+            return JSONResponse(content={"audio": []})
 
         audio_df = df[df["file_type"] == "audio"]
         records = audio_df.to_dict(orient="records")
@@ -306,19 +306,19 @@ def get_audio_files():
                 }
             grouped[p]["transcripts"].append(r["text"])
 
-        return jsonify({"audio": list(grouped.values())}), 200
-    except Exception as error_exception:
-        return jsonify({"detail": str(error_exception)}), 500
+        return JSONResponse(content={"audio": list(grouped.values())})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route("/api/video", methods=["GET"])
-def get_video_files():
+@app.get("/api/video")
+async def get_video_files():
     """Returns processed video files with keyframe & audio transcript metadata."""
     try:
         doc_table = get_table()
         df = doc_table.to_pandas()
         if df.empty:
-            return jsonify({"videos": []}), 200
+            return JSONResponse(content={"videos": []})
 
         video_df = df[df["file_type"].isin(["video", "video_frame"])]
         records = video_df.to_dict(orient="records")
@@ -337,10 +337,6 @@ def get_video_files():
                 "text": r["text"]
             })
 
-        return jsonify({"videos": list(grouped.values())}), 200
-    except Exception as error_exception:
-        return jsonify({"detail": str(error_exception)}), 500
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+        return JSONResponse(content={"videos": list(grouped.values())})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -89,6 +89,10 @@ class IntentRouter:
             return IntentRouter._handle_speaker(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.FULL_CONTENT_FETCH:
             return IntentRouter._handle_full_content(plan, question, analysis, return_structured)
+        elif plan.intent == QueryIntent.IMAGE_DISPLAY:
+            # Dedicated image retrieval handler: returns actual image path to the frontend.
+            # This handler must NOT re-examine the raw query for intent signals.
+            return IntentRouter._handle_image_display(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.VISUAL_QA:
             return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.SUMMARIZATION:
@@ -103,28 +107,24 @@ class IntentRouter:
         """
         Handler for metadata, file inventory, chunk count, date-range, and file listing queries.
         Uses deterministic LanceDB processed_files metadata lookup rather than semantic vector search.
+        All filter parameters come from QueryPlan.filters — the authoritative source of truth.
         """
         from app.rag.rag_pipeline import handle_temporal_query, handle_metadata_query
 
-        # Check temporal / date / file count / file list intent
-        if analysis.get("temporal_intent", "none") != "none" or plan.metadata.get("is_temporal", False):
-            ans_str, sources, num_chunks = handle_temporal_query(question, analysis)
-            update_last_interaction(question, ans_str, sources, plan.modality.value)
-            if return_structured:
-                return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
-            return ans_str, sources, num_chunks
-
-        # Specific file/chunk metadata query
-        res_meta = handle_metadata_query(question, analysis)
-        if isinstance(res_meta, tuple) and len(res_meta) == 4:
-            ans_str, sources, num_chunks, meta_info = res_meta
-        else:
-            ans_str, sources, num_chunks = res_meta[0], res_meta[1], res_meta[2]
-            meta_info = {}
-
+        # Pass QueryPlan.filters fields directly so handle_temporal_query respects the typed plan.
+        # The analysis dict is still passed as a legacy fallback for the intent/temporal_intent fields.
+        ans_str, sources, num_chunks = handle_temporal_query(
+            question,
+            analysis,
+            plan_modality=plan.modality.value,
+            plan_start_dt=plan.filters.start_datetime,
+            plan_end_dt=plan.filters.end_datetime,
+            plan_date_label=plan.filters.date_label,
+            plan_limit=plan.filters.extracted_limit,
+        )
         update_last_interaction(question, ans_str, sources, plan.modality.value)
         if return_structured:
-            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "metadata_info": meta_info, "type": "text", "images": []}
+            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
         return ans_str, sources, num_chunks
 
     @staticmethod
@@ -312,14 +312,69 @@ Response:"""
                     raw_vqa = f"Content in {src_name}:\n{ocr_text.strip()}"
 
             vqa_answer = clean_llm_answer(raw_vqa)
+            refusal_phrases = [
+                "cannot provide", "no image provided", "not provided an image",
+                "have not provided", "haven't provided", "please upload", "without being able to see",
+                "contains nudity", "explicit content", "safety guidelines", "cannot assist with",
+                "can't fulfill this request"
+            ]
+            if any(rp in vqa_answer.lower() for rp in refusal_phrases):
+                vqa_answer = f"Visual details for image '{src_name}':\n{ocr_text.strip()}"
         else:
             vqa_answer = summarize_image(canonical_path, question)
+            refusal_phrases = [
+                "cannot provide", "no image provided", "not provided an image",
+                "have not provided", "haven't provided", "please upload", "without being able to see",
+                "contains nudity", "explicit content", "safety guidelines", "cannot assist with",
+                "can't fulfill this request"
+            ]
+            if any(rp in vqa_answer.lower() for rp in refusal_phrases):
+                vqa_answer = f"Visual details for image '{src_name}': The image file is indexed in LanceDB."
 
         update_last_interaction(question, vqa_answer, [src_name], "image")
         if return_structured:
             return {"answer": vqa_answer, "sources": [src_name], "num_chunks": 1, "type": "text", "images": []}
         return vqa_answer, [src_name], 1
 
+
+    @staticmethod
+    def _handle_image_display(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
+        """
+        Handler for image retrieval / display requests.
+        Returns the image file path so the frontend renderer can display the actual image.
+        Does NOT re-examine the raw query for intent signals; all decisions come from QueryPlan fields.
+        """
+        canonical_path = plan.source_spec.canonical_path
+
+        # Attempt fallback resolution via watched_folder if canonical_path is missing
+        if not canonical_path or not os.path.exists(canonical_path):
+            if plan.source_spec.source_hint:
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                candidate_path = os.path.join(base_dir, "watched_folder", plan.source_spec.source_hint)
+                if os.path.exists(candidate_path):
+                    canonical_path = candidate_path
+
+        if not canonical_path or not os.path.exists(canonical_path):
+            src_name = plan.source_spec.source_hint or "image"
+            msg = f"No image file was found for '{src_name}'."
+            update_last_interaction(question, msg, [], "image")
+            if return_structured:
+                return {"answer": msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+            return msg, [], 0
+
+        src_name = os.path.basename(canonical_path)
+        ans_str = f"Retrieved image: '{src_name}'."
+        update_last_interaction(question, ans_str, [src_name], "image")
+
+        if return_structured:
+            return {
+                "answer": ans_str,
+                "sources": [src_name],
+                "num_chunks": 1,
+                "type": "image",
+                "images": [{"type": "image", "path": canonical_path, "source": src_name}]
+            }
+        return ans_str, [src_name], 1
 
     @staticmethod
     def _handle_summarization(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
@@ -330,11 +385,25 @@ Response:"""
         from app.rag.rag_pipeline import clean_llm_answer, validate_content_grounding
 
         canonical_path = plan.source_spec.canonical_path
-        
+
+        # Safety guard: if the user explicitly named a source that could not be resolved,
+        # do NOT fall through to global vector search — that would silently answer from a
+        # different file, which is a hallucination risk.
+        if plan.source_spec.is_explicit and not plan.source_spec.is_resolved:
+            source_display = plan.source_spec.source_hint or "requested"
+            if str(source_display).startswith("UNRESOLVED_"):
+                clean_name = str(source_display).replace("UNRESOLVED_SOURCE_", "").replace("UNRESOLVED_AUDIO_SOURCE", "").strip()
+                source_display = clean_name.capitalize() if clean_name else "requested"
+            unresolved_msg = f"I couldn't identify the '{source_display}' file, so I won't summarize a different file to answer this question."
+            update_last_interaction(question, unresolved_msg, [], plan.modality.value)
+            if return_structured:
+                return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+            return unresolved_msg, [], 0
+
         # If source is specified and resolved, fetch its complete text/transcript for summarization
         if canonical_path and os.path.exists(canonical_path):
             src_name = os.path.basename(canonical_path)
-            
+
             if plan.modality == Modality.IMAGE:
                 return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
 
@@ -365,7 +434,7 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
                     return {"answer": clean_summary, "sources": [src_name], "num_chunks": total_chunks, "type": "text", "images": []}
                 return clean_summary, [src_name], total_chunks
 
-        # Fallback to source-restricted hybrid search if no explicit canonical path is resolved
+        # No explicit source or unresolved: perform source-restricted hybrid search for summary
         return IntentRouter._handle_question_answering(plan, question, analysis, return_structured)
 
     @staticmethod
@@ -394,10 +463,20 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
         elif plan.source_spec.source_hint and not str(plan.source_spec.source_hint).startswith("UNRESOLVED_"):
             correct_source = plan.source_spec.source_hint
         else:
-            correct_source = "mummy.jpg"
+            # No identifiable source — do not invent one.
+            correct_source = ""
 
         if correct_source and wrong_source and correct_source.lower() == wrong_source.lower():
             wrong_source = ""
+
+        # Do not store feedback unless a real correct source can be identified.
+        # Never fall back to a hardcoded filename — that would poison feedback memory.
+        if not correct_source:
+            no_source_msg = "Correction noted, but I couldn't identify which file to associate it with. Please re-ask the question specifying the correct file."
+            update_last_interaction(question, no_source_msg, [], plan.modality.value)
+            if return_structured:
+                return {"answer": no_source_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
+            return no_source_msg, [], 0
 
         store_feedback(
             original_query=prev_query if prev_query else question,
@@ -427,12 +506,20 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
         """
         Handler for general Question Answering requests.
         Performs source-restricted hybrid vector search and grounded LLM generation.
+        Trusts QueryPlan.intent and QueryPlan.modality — does NOT re-classify intent
+        using raw query keywords.
         """
         from app.rag.rag_pipeline import clean_llm_answer, validate_content_grounding
         from app.storage.lancedb_store import search_feedback
 
         canonical_path = plan.source_spec.canonical_path
         source_hint = plan.source_spec.source_hint
+
+        # IMAGE_DISPLAY is handled in _handle_image_display; if somehow we reach here with
+        # IMAGE intent and a resolved canonical_path, delegate correctly rather than
+        # re-implementing inline logic.
+        if plan.intent == QueryIntent.IMAGE_DISPLAY:
+            return IntentRouter._handle_image_display(plan, question, analysis, return_structured)
 
         # If audio source is resolved, retrieve full transcript context
         if plan.modality == Modality.AUDIO and canonical_path and os.path.exists(canonical_path):
@@ -508,21 +595,19 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
         else:
             lang_instruction = "Respond in clear, professional English."
 
-        prompt = f"""Answer the user's question using ONLY the retrieved context below.
-
-STRICT GROUNDING RULES:
-1. Rely strictly on facts explicitly stated in the retrieved context. Never invent meanings, dates, numbers, company names, family names, or personal names.
-2. Identify topics, people, and events directly from the text.
-3. If the user asks for names, aliases, or background of a person or entity, list ONLY the exact names explicitly stated in the context text. Do NOT invent full names, father names, grandfather names, or aliases from external world knowledge.
-4. If the transcript or context text contains noisy ASR words or unclear names, preserve the raw transcript wording or state that the name is unclear rather than guessing fictitious company or personal names.
-5. {lang_instruction}
-
-{source_context_label}Retrieved Context:
-{context_str}
-
-Question: {question}
-
-Answer:"""
+        prompt = (
+            "Answer the user's question using ONLY the retrieved context below.\n\n"
+            "STRICT GROUNDING RULES:\n"
+            "1. Rely strictly on facts explicitly stated in the retrieved context. Never invent meanings, dates, numbers, company names, family names, or personal names.\n"
+            "2. Identify topics, people, and events directly from the text.\n"
+            "3. If the user asks for names, aliases, or background of a person or entity, list ONLY the exact names explicitly stated in the context text.\n"
+            "4. If the transcript or context text contains noisy ASR words or unclear names, preserve the raw transcript wording or state that the name is unclear.\n"
+            f"5. {lang_instruction}\n\n"
+            f"{source_context_label}Retrieved Context:\n"
+            f"{context_str}\n\n"
+            f"Question: {question}\n\n"
+            "Answer:"
+        )
 
         grounded_sys_instruction = (
             "You are a strictly grounded Personal Second Brain Assistant. "
