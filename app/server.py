@@ -1,8 +1,14 @@
+import sys
 import os
 import shutil
 import logging
 from pathlib import Path
 from typing import Optional, List
+
+# Ensure project root is in sys.path when running app/server.py directly
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 # Suppress HTTP request logs from external clients (httpx, httpcore, urllib3)
 logging.getLogger("httpx").setLevel(logging.WARNING)
