@@ -1546,12 +1546,12 @@ def analyze_query(question, indexed_files=None):
     else:
         face_person_name = extract_person_name_from_question(question)
 
-        if (
-            face_person_name is not None
-            or any(
-                re.search(pattern, question_lower)
-                for pattern in face_identity_patterns
-            )
+        # A person name does not by itself mean identification.
+        # Explicit identity questions identify a face; image-search
+        # phrasing searches the persistent face memory across images.
+        if any(
+            re.search(pattern, question_lower)
+            for pattern in face_identity_patterns
         ):
             face_intent = FaceIntent.IDENTIFICATION
 
