@@ -1439,34 +1439,9 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
             },
         }
 
-        question_lower = question.lower()
-
-        requested_type = None
-
-        if any(word in question_lower for word in [
-            "image", "images",
-            "photo", "photos",
-            "picture", "pictures"
-        ]):
-            requested_type = "image"
-
-
-        elif any(word in question_lower for word in [
-            "pdf", "pdfs"
-        ]):
-            requested_type = "pdf"
-
-        elif any(word in question_lower for word in [
-            "document", "documents",
-            "doc", "docs"
-        ]):
-            requested_type = "document"
-
-        elif any(word in question_lower for word in [
-            "spreadsheet", "spreadsheets",
-            "excel", "xlsx"
-        ]):
-            requested_type = "spreadsheet"
+        # QueryAnalyzer has already resolved the requested file type.
+        # This handler only executes the COUNT operation.
+        requested_type = getattr(plan, "file_type", None)
 
         if requested_type:
             extensions = extension_groups[requested_type]
