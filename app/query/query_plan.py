@@ -5,22 +5,31 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
+class QueryOperation(str, Enum):
+    ANSWER = "ANSWER"
+    SEARCH = "SEARCH"
+    COUNT = "COUNT"
+    LIST = "LIST"
+    FILTER = "FILTER"
+    SORT = "SORT"
+    GROUP = "GROUP"
+    FETCH = "FETCH"
+    SUMMARIZE = "SUMMARIZE"
+    DISPLAY = "DISPLAY"
+
+
 class QueryIntent(str, Enum):
-    """
-    Core semantic intents supported by the RAG architecture.
-    IMAGE_DISPLAY: user wants to see/retrieve an image (not describe/analyse it).
-    VISUAL_QA: user wants the image described, OCR'd, or visually analysed.
-    """
     METADATA_QUERY = "METADATA_QUERY"
+    SPREADSHEET_QUERY = "SPREADSHEET_QUERY"
+    SOURCE_TYPE = "SOURCE_TYPE"
+    SOURCE_TYPE_QUERY = "SOURCE_TYPE_QUERY"
     FULL_CONTENT_FETCH = "FULL_CONTENT_FETCH"
     SUMMARIZATION = "SUMMARIZATION"
-    SPEAKER_ANALYSIS = "SPEAKER_ANALYSIS"
     IMAGE_DISPLAY = "IMAGE_DISPLAY"
     VISUAL_QA = "VISUAL_QA"
     FACE_OPERATIONS = "FACE_OPERATIONS"
     QUESTION_ANSWERING = "QUESTION_ANSWERING"
     CORRECTION = "CORRECTION"
-
 
 class RequestScope(str, Enum):
     """
@@ -33,15 +42,10 @@ class RequestScope(str, Enum):
 
 
 class Modality(str, Enum):
-    """
-    Target media or document modality.
-    """
-    AUDIO = "audio"
     IMAGE = "image"
     DOCUMENT = "document"
     PDF = "pdf"
     DOCX = "docx"
-    VIDEO = "video"
     ALL = "all"
 
 
@@ -88,6 +92,7 @@ class QueryPlan:
     raw_query: str
     normalized_query: str
     intent: QueryIntent
+    operation: QueryOperation
     scope: RequestScope
     modality: Modality
     source_spec: SourceSpec
@@ -103,6 +108,7 @@ class QueryPlan:
         """
         return {
             "intent": self.intent.value,
+            "operation": self.operation.value,
             "request_scope": self.scope.value.lower(),
             "temporal_intent": "TEMPORAL_FILE_QUERY" if self.intent == QueryIntent.METADATA_QUERY else "none",
             "face_intent": "none",
