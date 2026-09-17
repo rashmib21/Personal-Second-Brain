@@ -95,6 +95,7 @@ class QueryPlan:
     operation: QueryOperation
     scope: RequestScope
     modality: Modality
+    file_type: Optional[str]
     source_spec: SourceSpec
     filters: QueryFilters
     is_correction: bool = False
@@ -116,6 +117,7 @@ class QueryPlan:
             "is_ocr_query": self.metadata.get("is_ocr_query", False),
             "is_image_summary_query": self.intent == QueryIntent.SUMMARIZATION and self.modality == Modality.IMAGE,
             "modality": self.modality.value,
+            "file_type": self.file_type,
             "source_hint": self.source_spec.source_hint,
             "canonical_source_id": self.source_spec.canonical_path,
             "unresolved_explicit_source": self.source_spec.is_explicit and not self.source_spec.is_resolved,

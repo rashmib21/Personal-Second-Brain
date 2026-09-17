@@ -1615,6 +1615,40 @@ def analyze_query(question, indexed_files=None):
         request_scope=request_scope,
     )
 
+    # Resolve the requested file category once during query understanding.
+    # Handlers should consume QueryPlan.file_type instead of reparsing
+    # the user's raw question.
+    file_type = None
+
+    if intent in {INTENT_FILE_COUNT, INTENT_IMAGE_COUNT_QUERY}:
+        if any(word in question_lower for word in (
+            "image", "images", "photo", "photos",
+            "picture", "pictures"
+        )):
+            file_type = "image"
+        elif re.search(r"\bpdfs?\b", question_lower):
+            file_type = "pdf"
+        elif any(word in question_lower for word in (
+            "document", "documents", "doc", "docs"
+        )):
+            file_type = "document"
+        elif any(word in question_lower for word in (
+            "spreadsheet", "spreadsheets", "excel", "xlsx"
+        )):
+            file_type = "spreadsheet"
+        elif any(word in question_lower for word in (
+            "presentation", "presentations",
+            "powerpoint", "powerpoint files",
+            "ppt", "pptx"
+        )):
+            file_type = "presentation"
+        elif any(word in question_lower for word in (
+            "archive", "archives", "zip", "tar"
+        )):
+            file_type = "archive"
+        else:
+            file_type = "all"
+
     plan = QueryPlan(
         raw_query=question,
         normalized_query=question_lower,
@@ -1622,6 +1656,7 @@ def analyze_query(question, indexed_files=None):
         operation=query_operation,
         scope=target_scope_enum,
         modality=target_modality_enum,
+        file_type=file_type,
         source_spec=SourceSpec(
             source_hint=source_hint,
             canonical_path=canonical_source_id if resolved_file_exists else None,
