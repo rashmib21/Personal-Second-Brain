@@ -2,7 +2,7 @@ import os
 import re
 import logging
 from typing import Dict, Any, Tuple, Union
-from app.query.query_plan import QueryPlan, QueryIntent, QueryOperation, RequestScope, Modality
+from app.query.query_plan import QueryPlan, QueryIntent, QueryOperation, RequestScope, Modality, FaceIntent
 from app.search.vector_search import search, get_full_content_for_source, get_stored_ocr_text_for_image
 from app.llm.ollama_client import ask_llama
 from app.llm.gemini_client import ask_gemini
@@ -711,7 +711,6 @@ class IntentRouter:
         """
         from app.rag.rag_pipeline import clean_llm_answer
         from app.services.face_service import analyze_faces_in_image
-        from app.search.face_search import extract_person_name_from_question
         from app.services.interaction_state import get_pending_faces
 
         # Check for pending faces in state first
@@ -719,31 +718,11 @@ class IntentRouter:
         # Never allow pending face state to hijack unrelated queries.
         pending_faces = get_pending_faces()
 
-        # Pending-face registration must NEVER hijack ordinary visual questions.
-        # Only explicit identity/recognition/registration questions may enter
-        # the pending-face flow.
-        face_identity_keywords = (
-            "who is",
-            "whose face",
-            "recognize",
-            "identify",
-            "register this face",
-            "register this person",
-            "remember this person",
-            "is this person",
-            "is rashmi",
-        )
-
-        question_lower = question.lower().strip()
-        explicit_face_identity_query = any(
-            keyword in question_lower
-            for keyword in face_identity_keywords
-        )
-
+        # QueryAnalyzer owns face-intent interpretation.
+        # This handler only consumes the typed QueryPlan.
         if (
             pending_faces
-            and plan.intent == QueryIntent.FACE_OPERATIONS
-            and explicit_face_identity_query
+            and plan.face_intent == FaceIntent.IDENTIFICATION
         ):
             msg = "I found a person I don't recognize yet. Who is this person?"
             src_file = os.path.basename(
@@ -788,56 +767,12 @@ class IntentRouter:
         # ---------------------------------------------------------
         # Face-related visual questions
         # ---------------------------------------------------------
-        person_name = extract_person_name_from_question(question)
-        question_lower = question.lower().strip()
+        # QueryAnalyzer has already classified the face intent.
+        # Do NOT re-parse the natural-language question here.
+        face_intent = plan.face_intent
+        person_name = plan.face_person_name
 
-        face_count_query = any(
-            phrase in question_lower
-            for phrase in [
-                "how many people",
-                "how many persons",
-                "how many person",
-                "number of people",
-                "number of persons",
-                "count the people",
-                "count people",
-                "count of people",
-                "how many faces",
-                "number of faces",
-                "count the faces",
-                "count faces",
-            ]
-        )
-
-        face_identity_query = (
-            any(
-                phrase in question_lower
-                for phrase in [
-                    "who is",
-                    "who are",
-                    "whose face",
-                    "identify",
-                    "recognize",
-                    "which person",
-                    "is this person",
-                ]
-            )
-            or person_name is not None
-        )
-
-        face_presence_query = any(
-            phrase in question_lower
-            for phrase in [
-                "is there a person",
-                "is there anyone",
-                "are there people",
-                "is anyone",
-                "does the image contain a person",
-                "does the image contain people",
-            ]
-        )
-
-        if face_count_query or face_identity_query or face_presence_query:
+        if face_intent != FaceIntent.NONE:
             face_res = analyze_faces_in_image(canonical_path)
 
             faces_detected = int(
@@ -848,7 +783,7 @@ class IntentRouter:
             # -----------------------------------------------------
             # 1. Explicit face/person COUNT query
             # -----------------------------------------------------
-            if face_count_query:
+            if face_intent == FaceIntent.COUNT:
                 if faces_detected == 0:
                     msg = f"No people were detected in {src_name}."
                 elif faces_detected == 1:
@@ -877,7 +812,7 @@ class IntentRouter:
             # -----------------------------------------------------
             # 2. Explicit person identity query
             # -----------------------------------------------------
-            if face_identity_query:
+            if face_intent == FaceIntent.IDENTIFICATION:
                 if person_name:
                     matching_face = None
 
@@ -951,7 +886,7 @@ class IntentRouter:
             # -----------------------------------------------------
             # 3. Explicit person-presence query
             # -----------------------------------------------------
-            if face_presence_query:
+            if face_intent == FaceIntent.PRESENCE:
                 if faces_detected > 0:
                     msg = (
                         f"Yes. I detected {faces_detected} "
@@ -978,6 +913,9 @@ class IntentRouter:
 
                 return msg, [src_name], len(faces_list)
 
+            # SEARCH is intentionally not handled as a single-image
+            # visual operation here. It requires cross-image face-memory
+            # retrieval and will be routed separately.
         # Handle OCR queries specifically
         if plan.metadata.get("is_ocr_query", False) or analysis.get("is_ocr_query", False):
             ocr_text, total_chunks = get_stored_ocr_text_for_image(canonical_path)
