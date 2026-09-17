@@ -1,14 +1,77 @@
 import os
 import re
+import logging
 from typing import Dict, Any, Tuple, Union
-from app.query.query_plan import QueryPlan, QueryIntent, RequestScope, Modality
-from app.search.vector_search import search, get_full_transcript_for_source, get_stored_ocr_text_for_image
+from app.query.query_plan import QueryPlan, QueryIntent, QueryOperation, RequestScope, Modality
+from app.search.vector_search import search, get_full_content_for_source, get_stored_ocr_text_for_image
 from app.llm.ollama_client import ask_llama
 from app.llm.gemini_client import ask_gemini
 from app.rag.image_summarizer import summarize_image
-from app.services.interaction_state import update_last_interaction
+from app.services.interaction_state import (
+    update_last_interaction,
+    get_pending_spreadsheet_query,
+    set_pending_spreadsheet_query,
+    clear_pending_spreadsheet_query,
+)
+from app.rag.spreadsheet_query import (
+    load_spreadsheet_rows,
+    filter_rows,
+    sort_rows,
+    group_by_city,
+    format_rows,
+)
 from config import DEBUG
+from app.query.query_analyzer import build_query_plan
 
+logger = logging.getLogger(__name__)
+
+@staticmethod
+def _handle_source_type(plan, question, analysis, return_structured=False):
+    import os
+
+    canonical_path = plan.source_spec.canonical_path
+    source_name = (
+        plan.source_spec.filename
+        or plan.source_spec.source_hint
+        or os.path.basename(canonical_path or "")
+    )
+
+    if not canonical_path or not os.path.exists(canonical_path):
+        answer = "The requested source could not be found."
+    else:
+        extension = os.path.splitext(canonical_path)[1].lower()
+
+        image_extensions = {
+            ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif"
+        }
+
+        document_extensions = {
+            ".pdf", ".doc", ".docx", ".txt", ".md", ".rtf"
+        }
+
+        spreadsheet_extensions = {
+            ".xls", ".xlsx", ".csv", ".ods"
+        }
+
+        if extension in image_extensions:
+            file_type = "image"
+        elif extension in document_extensions:
+            file_type = "document"
+        elif extension in spreadsheet_extensions:
+            file_type = "spreadsheet"
+        else:
+            file_type = "file"
+
+        answer = f"It is an {file_type}."
+
+    if return_structured:
+        return {
+            "type": "text",
+            "answer": answer,
+            "sources": [source_name] if source_name else [],
+        }
+
+    return answer, [source_name] if source_name else [], 0
 
 class IntentRouter:
     """
@@ -17,14 +80,101 @@ class IntentRouter:
     """
 
     @staticmethod
+    def _handle_pending_spreadsheet_selection(
+        question: str,
+        return_structured: bool
+    ):
+        """
+        Handles a filename selected after the router asked the user
+        to choose between multiple spreadsheets.
+        """
+
+        pending = get_pending_spreadsheet_query()
+
+        original_query = pending.get("query", "")
+        candidates = pending.get("candidates", [])
+
+        if not original_query or not candidates:
+            return None
+
+        user_filename = os.path.basename(
+            question.strip().strip('"')
+        ).lower()
+
+        matches = [
+            candidate
+            for candidate in candidates
+            if os.path.basename(candidate).lower() == user_filename
+        ]
+
+        # The current message is not an exact unique candidate.
+        if len(matches) != 1:
+            return None
+
+        selected_path = matches[0]
+
+        # Selection is complete.
+        clear_pending_spreadsheet_query()
+
+        # Rebuild the QueryPlan from the ORIGINAL query.
+        original_plan = build_query_plan(original_query)
+
+        # Force only the source selected by the user.
+        original_plan.source_spec.canonical_path = selected_path
+        original_plan.source_spec.source_hint = os.path.basename(
+            selected_path
+        )
+        original_plan.source_spec.is_explicit = True
+        original_plan.source_spec.is_resolved = True
+        original_plan.source_spec.is_ambiguous = False
+        original_plan.source_spec.confidence = 1.0
+        original_plan.source_spec.candidate_sources = []
+
+        logger.info(
+            "Spreadsheet selection resolved: '%s' -> '%s'",
+            original_query,
+            selected_path
+        )
+
+        return IntentRouter._handle_spreadsheet_query(
+            original_plan,
+            original_query,
+            original_plan.to_dict(),
+            return_structured
+        )
+
+
     def dispatch(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool = False) -> Union[Tuple[str, list, int], Dict[str, Any]]:
         """
         Main entry point for dispatching a QueryPlan to its designated strategy handler.
         """
+        # ---------------------------------------------------------
+        # Pending spreadsheet clarification
+        # ---------------------------------------------------------
+        # If the previous turn asked the user to choose a spreadsheet,
+        # treat the current filename as a source selection and resume
+        # the ORIGINAL spreadsheet query.
+        spreadsheet_selection_result = (
+            IntentRouter._handle_pending_spreadsheet_selection(
+                question,
+                return_structured
+            )
+        )
+
+        if spreadsheet_selection_result is not None:
+            return spreadsheet_selection_result
+
         from app.services.interaction_state import get_pending_faces
+
         pending_faces = get_pending_faces()
-        if pending_faces:
-            return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
+
+        if pending_faces and plan.intent == QueryIntent.FACE_OPERATIONS:
+            return IntentRouter._handle_visual_qa(
+                plan,
+                question,
+                analysis,
+                return_structured
+            )
 
         # Step 1: Incomplete / Ambiguous Source Clarification Guard
         # If the request requires a source (e.g. summarization, full transcript, visual QA)
@@ -44,6 +194,13 @@ class IntentRouter:
                 clarification_msg = "Sure — which file's complete content would you like to view?"
             elif plan.intent == QueryIntent.VISUAL_QA:
                 clarification_msg = "Sure — which image file are you referring to?"
+            elif plan.intent == QueryIntent.SOURCE_TYPE:
+                return IntentRouter._handle_source_type(
+                    plan,
+                    question,
+                    analysis,
+                    return_structured
+                )    
             else:
                 clarification_msg = "Sure — which file are you referring to?"
 
@@ -62,7 +219,7 @@ class IntentRouter:
         if plan.source_spec.is_explicit and not plan.source_spec.is_resolved:
             source_display = plan.source_spec.source_hint or "requested"
             if str(source_display).startswith("UNRESOLVED_SOURCE_"):
-                clean_name = str(source_display).replace("UNRESOLVED_SOURCE_", "").replace("UNRESOLVED_AUDIO_SOURCE", "").strip()
+                clean_name = str(source_display).replace("UNRESOLVED_SOURCE_", "").strip()               
                 if clean_name.isupper() or len(clean_name) <= 3:
                     source_display = clean_name.upper()
                 else:
@@ -83,10 +240,32 @@ class IntentRouter:
             return unresolved_msg, [], 0
 
         # Step 2: Route to designated Intent Strategy Handler based on QueryPlan.intent
-        if plan.intent == QueryIntent.METADATA_QUERY:
-            return IntentRouter._handle_metadata(plan, question, analysis, return_structured)
-        elif plan.intent == QueryIntent.SPEAKER_ANALYSIS:
-            return IntentRouter._handle_speaker(plan, question, analysis, return_structured)
+
+        # Structured spreadsheet queries must bypass semantic RAG.
+        if plan.intent == QueryIntent.SPREADSHEET_QUERY:
+            return IntentRouter._handle_spreadsheet_query(
+                plan,
+                question,
+                analysis,
+                return_structured
+            )
+
+        elif plan.intent == QueryIntent.METADATA_QUERY:
+            if plan.operation == QueryOperation.COUNT:
+                return IntentRouter._handle_file_count(
+                    plan,
+                    question,
+                    analysis,
+                    return_structured
+                )
+
+            return IntentRouter._handle_metadata(
+                plan,
+                question,
+                analysis,
+                return_structured
+            )
+        
         elif plan.intent == QueryIntent.FULL_CONTENT_FETCH:
             return IntentRouter._handle_full_content(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.IMAGE_DISPLAY:
@@ -101,6 +280,334 @@ class IntentRouter:
             return IntentRouter._handle_correction(plan, question, analysis, return_structured)
         else:
             return IntentRouter._handle_question_answering(plan, question, analysis, return_structured)
+
+    @staticmethod
+    def _handle_spreadsheet_query(
+        plan: QueryPlan,
+        question: str,
+        analysis: Dict[str, Any],
+        return_structured: bool
+    ) -> Union[Tuple[str, list, int], Dict[str, Any]]:
+        """
+        Deterministic handler for structured spreadsheet queries.
+
+        This bypasses vector search, BM25, RRF, CrossEncoder,
+        and LLM generation. The complete spreadsheet is loaded
+        and filtered/sorted directly.
+        """
+
+        canonical_path = None
+
+        # ---------------------------------------------------------
+        # 1. Use an already-resolved spreadsheet source if present
+        # ---------------------------------------------------------
+        if (
+            plan.source_spec.canonical_path
+            and os.path.exists(plan.source_spec.canonical_path)
+        ):
+            extension = os.path.splitext(
+                plan.source_spec.canonical_path
+            )[1].lower()
+
+            if extension in {".xlsx", ".xls", ".csv", ".ods"}:
+                canonical_path = plan.source_spec.canonical_path
+
+        # ---------------------------------------------------------
+        # 2. Find spreadsheets in watched_folder
+        # ---------------------------------------------------------
+        if not canonical_path:
+            current_file = os.path.abspath(__file__)
+
+            project_root = os.path.dirname(
+                os.path.dirname(
+                    os.path.dirname(current_file)
+                )
+            )
+
+            watched_folder = os.path.join(
+                project_root,
+                "watched_folder"
+            )
+
+            spreadsheet_extensions = {
+                ".xlsx", ".xls", ".csv", ".ods"
+            }
+
+            candidates = []
+
+            if os.path.isdir(watched_folder):
+                for root, dirs, files in os.walk(watched_folder):
+                    for filename in files:
+                        extension = os.path.splitext(
+                            filename
+                        )[1].lower()
+
+                        if extension in spreadsheet_extensions:
+                            candidates.append(
+                                os.path.join(root, filename)
+                            )
+
+            # One spreadsheet = unambiguous
+            if len(candidates) == 1:
+                canonical_path = candidates[0]
+
+            # Multiple spreadsheets
+            elif len(candidates) > 1:
+                source_hint = None
+
+                if plan.source_spec:
+                    source_hint = (
+                        getattr(
+                            plan.source_spec,
+                            "source_hint",
+                            None
+                        )
+                        or getattr(
+                            plan.source_spec,
+                            "filename",
+                            None
+                        )
+                    )
+
+                if source_hint:
+                    hint_name = os.path.basename(
+                        source_hint
+                    ).lower()
+
+                    matching = [
+                        p for p in candidates
+                        if os.path.basename(p).lower()
+                        == hint_name
+                    ]
+
+                    if len(matching) == 1:
+                        canonical_path = matching[0]
+
+                # If still ambiguous, don't randomly select a workbook.
+                if not canonical_path:
+                    names = [
+                        os.path.basename(p)
+                        for p in candidates[:5]
+                    ]
+
+                    msg = (
+                        "I found multiple spreadsheet files. "
+                        "Please specify which spreadsheet you want "
+                        "to query: "
+                        + ", ".join(names)
+                    )
+
+                    # Remember the original structured query so that
+                    # the user's next filename reply can select the
+                    # spreadsheet and continue the original request.
+                    set_pending_spreadsheet_query(
+                        question,
+                        candidates
+                    )
+
+                    update_last_interaction(
+                        question,
+                        msg,
+                        [],
+                        plan.modality.value
+                    )
+
+                    if return_structured:
+                        return {
+                            "answer": msg,
+                            "sources": [],
+                            "num_chunks": 0,
+                            "type": "text",
+                            "images": []
+                        }
+
+                    return msg, [], 0
+
+        # ---------------------------------------------------------
+        # 3. No spreadsheet found
+        # ---------------------------------------------------------
+        if not canonical_path or not os.path.exists(canonical_path):
+            msg = (
+                "I couldn't find a spreadsheet file to use "
+                "for this query."
+            )
+
+            update_last_interaction(
+                question,
+                msg,
+                [],
+                plan.modality.value
+            )
+
+            if return_structured:
+                return {
+                    "answer": msg,
+                    "sources": [],
+                    "num_chunks": 0,
+                    "type": "text",
+                    "images": []
+                }
+
+            return msg, [], 0
+
+        # ---------------------------------------------------------
+        # 4. Load complete spreadsheet
+        # ---------------------------------------------------------
+        try:
+            rows = load_spreadsheet_rows(
+                canonical_path
+            )
+        except Exception:
+            logger.exception(
+                "Failed to load spreadsheet: %s",
+                canonical_path
+            )
+
+            msg = (
+                f"I couldn't read the spreadsheet "
+                f"'{os.path.basename(canonical_path)}'."
+            )
+
+            source_name = os.path.basename(
+                canonical_path
+            )
+
+            update_last_interaction(
+                question,
+                msg,
+                [source_name],
+                plan.modality.value
+            )
+
+            if return_structured:
+                return {
+                    "answer": msg,
+                    "sources": [source_name],
+                    "num_chunks": 0,
+                    "type": "text",
+                    "images": []
+                }
+
+            return msg, [source_name], 0
+
+        # ---------------------------------------------------------
+        # 5. Deterministic filtering
+        # ---------------------------------------------------------
+        filtered_rows = filter_rows(
+            rows,
+            question
+        )
+
+        question_lower = question.lower()
+
+        # ---------------------------------------------------------
+        # 6. Group by city when explicitly requested
+        # ---------------------------------------------------------
+        group_requested = bool(
+            re.search(
+                r"\b(?:each|every|per)\s+city\b",
+                question_lower
+            )
+            or re.search(
+                r"\bof\s+each\s+city\b",
+                question_lower
+            )
+        )
+
+        if group_requested:
+            grouped = group_by_city(
+                filtered_rows
+            )
+
+            sections = []
+
+            for city, city_rows in grouped.items():
+                city_rows = sort_rows(
+                    city_rows,
+                    question
+                )
+
+                sections.append(
+                    f"### {city}\n"
+                    f"{format_rows(city_rows)}"
+                )
+
+            answer = "\n\n".join(sections)
+
+        else:
+            # -----------------------------------------------------
+            # 7. Deterministic sorting
+            # -----------------------------------------------------
+            filtered_rows = sort_rows(
+                filtered_rows,
+                question
+            )
+
+            answer = format_rows(
+                filtered_rows
+            )
+
+        # ---------------------------------------------------------
+        # 8. Count queries
+        # ---------------------------------------------------------
+        is_count_query = bool(
+            re.search(
+                r"\bhow\s+many\b",
+                question_lower
+            )
+            or re.search(
+                r"\bnumber\s+of\b",
+                question_lower
+            )
+            or re.search(
+                r"\bcount\b",
+                question_lower
+            )
+        )
+
+        if is_count_query:
+            answer = (
+                f"There are {len(filtered_rows)} matching "
+                f"companies in "
+                f"'{os.path.basename(canonical_path)}'."
+            )
+
+        # ---------------------------------------------------------
+        # 9. No matches
+        # ---------------------------------------------------------
+        if not filtered_rows:
+            answer = (
+                "No companies matched the requested "
+                "spreadsheet filters."
+            )
+
+        source_name = os.path.basename(
+            canonical_path
+        )
+
+        # ---------------------------------------------------------
+        # 10. Save interaction state
+        # ---------------------------------------------------------
+        update_last_interaction(
+            question,
+            answer,
+            [source_name],
+            plan.modality.value
+        )
+
+        # ---------------------------------------------------------
+        # 11. Return result
+        # ---------------------------------------------------------
+        if return_structured:
+            return {
+                "answer": answer,
+                "sources": [source_name],
+                "num_chunks": len(filtered_rows),
+                "type": "text",
+                "images": []
+            }
+
+        return answer, [source_name], len(filtered_rows)
 
     @staticmethod
     def _handle_metadata(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
@@ -127,26 +634,14 @@ class IntentRouter:
             return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
         return ans_str, sources, num_chunks
 
-    @staticmethod
-    def _handle_speaker(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
-        """
-        Handler for speaker diarization and speaker identification queries.
-        """
-        from app.rag.rag_pipeline import handle_speaker_query
-
-        ans_str, sources, num_chunks = handle_speaker_query(question, analysis)
-        update_last_interaction(question, ans_str, sources, plan.modality.value)
-        if return_structured:
-            return {"answer": ans_str, "sources": sources, "num_chunks": num_chunks, "type": "text", "images": []}
-        return ans_str, sources, num_chunks
-
+    
     @staticmethod
     def _handle_full_content(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
         """
         Handler for complete-file content retrieval and full-file translation requests.
         Retrieves ALL ordered chunks belonging to the resolved source without relying on top-K semantic search.
         """
-        from app.rag.rag_pipeline import translate_full_transcript, validate_content_grounding
+        from app.rag.rag_pipeline import translate_full_content, validate_content_grounding
 
         canonical_path = plan.source_spec.canonical_path
         if not canonical_path or not os.path.exists(canonical_path):
@@ -157,7 +652,7 @@ class IntentRouter:
                 return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
             return unresolved_msg, [], 0
 
-        full_transcript, total_chunks, val_metrics = get_full_transcript_for_source(canonical_path)
+        full_content, total_chunks, val_metrics = get_full_content_for_source(canonical_path)
         src_name = os.path.basename(canonical_path)
 
         if not val_metrics.get("is_complete", True) and val_metrics.get("missing_chunks", 0) > 0:
@@ -177,19 +672,18 @@ class IntentRouter:
                 }
             return incomplete_msg, [src_name], val_metrics.get("fetched_chunks", 0)
 
-        if full_transcript:
+        if full_content:
             target_lang = plan.filters.target_language
-            if target_lang is not None or analysis.get("intent") == "AUDIO_TRANSLATION":
-                target_lang_name = target_lang if target_lang else "English"
-                final_output, translated_batch_count = translate_full_transcript(
-                    full_transcript,
-                    target_language=target_lang_name,
+            if target_lang is not None:
+                final_output, translated_batch_count = translate_full_content(
+                    full_content,
+                    target_language=target_lang,
                     source_filename=canonical_path
                 )
             else:
-                final_output = full_transcript
+                final_output = full_content
 
-            validate_content_grounding(full_transcript, final_output, question, canonical_path)
+            validate_content_grounding(full_content, final_output, question, canonical_path)
 
             update_last_interaction(question, final_output, [src_name], plan.modality.value)
             if return_structured:
@@ -197,7 +691,7 @@ class IntentRouter:
                     "answer": final_output,
                     "sources": [src_name],
                     "num_chunks": total_chunks,
-                    "evidence": [{"source": src_name, "chunk_id": 1, "text": full_transcript}],
+                    "evidence": [{"source": src_name, "chunk_id": 1, "text": full_content}],
                     "type": "text",
                     "images": [],
                     "validation_metrics": val_metrics
@@ -221,15 +715,58 @@ class IntentRouter:
         from app.services.interaction_state import get_pending_faces
 
         # Check for pending faces in state first
+        # Check pending face state ONLY for face-related requests.
+        # Never allow pending face state to hijack unrelated queries.
         pending_faces = get_pending_faces()
-        if pending_faces:
-            msg = "I found a person I don't recognize yet. Who is this person?"
-            src_file = os.path.basename(pending_faces[0].get("source_id", "test_unknown.jpg"))
-            update_last_interaction(question, msg, [src_file], "image")
-            if return_structured:
-                return {"answer": msg, "sources": [src_file], "num_chunks": 1, "type": "text", "images": []}
-            return msg, [src_file], 1
 
+        # Pending-face registration must NEVER hijack ordinary visual questions.
+        # Only explicit identity/recognition/registration questions may enter
+        # the pending-face flow.
+        face_identity_keywords = (
+            "who is",
+            "whose face",
+            "recognize",
+            "identify",
+            "register this face",
+            "register this person",
+            "remember this person",
+            "is this person",
+            "is rashmi",
+        )
+
+        question_lower = question.lower().strip()
+        explicit_face_identity_query = any(
+            keyword in question_lower
+            for keyword in face_identity_keywords
+        )
+
+        if (
+            pending_faces
+            and plan.intent == QueryIntent.FACE_OPERATIONS
+            and explicit_face_identity_query
+        ):
+            msg = "I found a person I don't recognize yet. Who is this person?"
+            src_file = os.path.basename(
+                pending_faces[0].get("source_id", "test_unknown.jpg")
+            )
+
+            update_last_interaction(
+                question,
+                msg,
+                [src_file],
+                "image"
+            )
+
+            if return_structured:
+                return {
+                    "answer": msg,
+                    "sources": [src_file],
+                    "num_chunks": 1,
+                    "type": "text",
+                    "images": []
+                }
+
+            return msg, [src_file], 1
         canonical_path = plan.source_spec.canonical_path
         if not canonical_path or not os.path.exists(canonical_path):
             if plan.source_spec.source_hint:
@@ -248,32 +785,197 @@ class IntentRouter:
 
         src_name = os.path.basename(canonical_path)
 
-        # Check for face operations or person inquiry in image
+        # ---------------------------------------------------------
+        # Face-related visual questions
+        # ---------------------------------------------------------
         person_name = extract_person_name_from_question(question)
-        if any(w in question.lower() for w in ["who is", "who are", "person", "lady", "woman", "man", "people", "faces", "face"]):
+        question_lower = question.lower().strip()
+
+        face_count_query = any(
+            phrase in question_lower
+            for phrase in [
+                "how many people",
+                "how many persons",
+                "how many person",
+                "number of people",
+                "number of persons",
+                "count the people",
+                "count people",
+                "count of people",
+                "how many faces",
+                "number of faces",
+                "count the faces",
+                "count faces",
+            ]
+        )
+
+        face_identity_query = (
+            any(
+                phrase in question_lower
+                for phrase in [
+                    "who is",
+                    "who are",
+                    "whose face",
+                    "identify",
+                    "recognize",
+                    "which person",
+                    "is this person",
+                ]
+            )
+            or person_name is not None
+        )
+
+        face_presence_query = any(
+            phrase in question_lower
+            for phrase in [
+                "is there a person",
+                "is there anyone",
+                "are there people",
+                "is anyone",
+                "does the image contain a person",
+                "does the image contain people",
+            ]
+        )
+
+        if face_count_query or face_identity_query or face_presence_query:
             face_res = analyze_faces_in_image(canonical_path)
-            faces_detected = face_res.get("faces_detected", 0)
-            faces_list = face_res.get("faces", [])
 
-            if person_name:
-                matching_face = None
-                for f in faces_list:
-                    if f.get("person_name") and f.get("person_name").lower() == person_name.lower() and f.get("status") == "known":
-                        matching_face = f
-                        break
-                if matching_face:
-                    msg = f"Yes, {person_name} was found in {src_name}."
-                    update_last_interaction(question, msg, [src_name], "image")
-                    if return_structured:
-                        return {"answer": msg, "sources": [src_name], "num_chunks": len(faces_list), "type": "text", "images": []}
-                    return msg, [src_name], len(faces_list)
+            faces_detected = int(
+                face_res.get("faces_detected", 0) or 0
+            )
+            faces_list = face_res.get("faces", []) or []
 
-            if faces_detected > 0:
-                known_names = [f["person_name"] for f in faces_list if f.get("person_name")]
-                msg = f"Identified person: {', '.join(known_names)}." if known_names else "I found a person I don't recognize yet. Who is this person?"
-                update_last_interaction(question, msg, [src_name], "image")
+            # -----------------------------------------------------
+            # 1. Explicit face/person COUNT query
+            # -----------------------------------------------------
+            if face_count_query:
+                if faces_detected == 0:
+                    msg = f"No people were detected in {src_name}."
+                elif faces_detected == 1:
+                    msg = f"1 person is visible in {src_name}."
+                else:
+                    msg = f"{faces_detected} people are visible in {src_name}."
+
+                update_last_interaction(
+                    question,
+                    msg,
+                    [src_name],
+                    "image"
+                )
+
                 if return_structured:
-                    return {"answer": msg, "sources": [src_name], "num_chunks": len(faces_list), "type": "text", "images": []}
+                    return {
+                        "answer": msg,
+                        "sources": [src_name],
+                        "num_chunks": len(faces_list),
+                        "type": "text",
+                        "images": []
+                    }
+
+                return msg, [src_name], len(faces_list)
+
+            # -----------------------------------------------------
+            # 2. Explicit person identity query
+            # -----------------------------------------------------
+            if face_identity_query:
+                if person_name:
+                    matching_face = None
+
+                    for f in faces_list:
+                        stored_name = f.get("person_name")
+
+                        if (
+                            stored_name
+                            and stored_name.lower() == person_name.lower()
+                            and f.get("status") == "known"
+                        ):
+                            matching_face = f
+                            break
+
+                    if matching_face:
+                        msg = f"Yes, {person_name} was found in {src_name}."
+
+                        update_last_interaction(
+                            question,
+                            msg,
+                            [src_name],
+                            "image"
+                        )
+
+                        if return_structured:
+                            return {
+                                "answer": msg,
+                                "sources": [src_name],
+                                "num_chunks": len(faces_list),
+                                "type": "text",
+                                "images": []
+                            }
+
+                        return msg, [src_name], len(faces_list)
+
+                known_names = [
+                    f.get("person_name")
+                    for f in faces_list
+                    if f.get("person_name")
+                    and f.get("status") == "known"
+                ]
+
+                if known_names:
+                    msg = f"Identified person(s): {', '.join(known_names)}."
+                elif faces_detected > 0:
+                    msg = (
+                        f"I detected {faces_detected} face(s) in {src_name}, "
+                        "but I don't have a stored identity for them."
+                    )
+                else:
+                    msg = f"No faces were detected in {src_name}."
+
+                update_last_interaction(
+                    question,
+                    msg,
+                    [src_name],
+                    "image"
+                )
+
+                if return_structured:
+                    return {
+                        "answer": msg,
+                        "sources": [src_name],
+                        "num_chunks": len(faces_list),
+                        "type": "text",
+                        "images": []
+                    }
+
+                return msg, [src_name], len(faces_list)
+
+            # -----------------------------------------------------
+            # 3. Explicit person-presence query
+            # -----------------------------------------------------
+            if face_presence_query:
+                if faces_detected > 0:
+                    msg = (
+                        f"Yes. I detected {faces_detected} "
+                        f"person/people in {src_name}."
+                    )
+                else:
+                    msg = f"No. I did not detect any people in {src_name}."
+
+                update_last_interaction(
+                    question,
+                    msg,
+                    [src_name],
+                    "image"
+                )
+
+                if return_structured:
+                    return {
+                        "answer": msg,
+                        "sources": [src_name],
+                        "num_chunks": len(faces_list),
+                        "type": "text",
+                        "images": []
+                    }
+
                 return msg, [src_name], len(faces_list)
 
         # Handle OCR queries specifically
@@ -285,53 +987,48 @@ class IntentRouter:
                     return {"answer": ocr_text, "sources": [src_name], "num_chunks": total_chunks, "ocr_text": ocr_text, "type": "text", "images": []}
                 return ocr_text, [src_name], total_chunks
 
+        # ---------------------------------------------------------
         # Standard Visual QA / Image Description
+        # ---------------------------------------------------------
+        # IMPORTANT:
+        # Image understanding must always use the actual image.
+        # OCR is supporting evidence only and must never replace
+        # VLM-based visual analysis.
+        #
+        # This prevents cases where tiny/garbled OCR text causes
+        # an image-summary request to be answered from OCR alone.
+
         ocr_text, ocr_chunks = get_stored_ocr_text_for_image(canonical_path)
 
-        if ocr_text and ocr_text.strip():
-            vqa_prompt = f"""You are a Visual Assistant. Analyze the image content below and fulfill the user request.
+        try:
+            vqa_answer = summarize_image(
+                canonical_path,
+                question
+            )
+        except Exception as e:
+            logger.warning(
+                f"VLM image analysis failed for {canonical_path}: {e}"
+            )
+            vqa_answer = ""
 
-IMAGE OCR EVIDENCE:
-{ocr_text.strip()}
+        # If VLM returned a useful answer, use it directly.
+        if vqa_answer and vqa_answer.strip():
+            vqa_answer = clean_llm_answer(vqa_answer)
 
-USER REQUEST: {question}
-
-RESPONSE FORMAT INSTRUCTIONS:
-Separate your answer into:
-A. Directly visible/readable text: List exact words and labels visible.
-B. Visual description: Describe the diagram or image structure.
-C. Interpretation: Provide a cautious explanation, preserving any uncertainty rather than inventing facts.
-
-Response:"""
-            try:
-                raw_vqa = ask_llama(vqa_prompt)
-            except Exception:
-                try:
-                    raw_vqa = ask_gemini(vqa_prompt)
-                except Exception:
-                    raw_vqa = f"Content in {src_name}:\n{ocr_text.strip()}"
-
-            vqa_answer = clean_llm_answer(raw_vqa)
-            refusal_phrases = [
-                "cannot provide", "no image provided", "not provided an image",
-                "have not provided", "haven't provided", "please upload", "without being able to see",
-                "contains nudity", "explicit content", "safety guidelines", "cannot assist with",
-                "can't fulfill this request"
-            ]
-            if any(rp in vqa_answer.lower() for rp in refusal_phrases):
-                vqa_answer = f"Visual details for image '{src_name}':\n{ocr_text.strip()}"
-        else:
-            vqa_answer = summarize_image(canonical_path, question)
-            refusal_phrases = [
-                "cannot provide", "no image provided", "not provided an image",
-                "have not provided", "haven't provided", "please upload", "without being able to see",
-                "contains nudity", "explicit content", "safety guidelines", "cannot assist with",
-                "can't fulfill this request"
-            ]
-            if any(rp in vqa_answer.lower() for rp in refusal_phrases):
-                vqa_answer = f"Visual details for image '{src_name}': The image file is indexed in LanceDB."
-
-        update_last_interaction(question, vqa_answer, [src_name], "image")
+        # Only use OCR as a fallback when VLM genuinely produced
+        # no usable result.
+        if not vqa_answer or not vqa_answer.strip():
+            if ocr_text and ocr_text.strip():
+                vqa_answer = (
+                    f"Visual analysis was unavailable for '{src_name}'. "
+                    f"The following text was extracted from the image:\n\n"
+                    f"{ocr_text.strip()}"
+                )
+            else:
+                vqa_answer = (
+                    f"I couldn't obtain usable visual information from "
+                    f"'{src_name}'."
+                )
         if return_structured:
             return {"answer": vqa_answer, "sources": [src_name], "num_chunks": 1, "type": "text", "images": []}
         return vqa_answer, [src_name], 1
@@ -379,7 +1076,7 @@ Response:"""
     @staticmethod
     def _handle_summarization(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
         """
-        Handler for summarization requests across audio, documents, and images.
+        Handler for summarization requests across documents and images.
         Retrieves complete transcript/content for the resolved source to build a grounded summary.
         """
         from app.rag.rag_pipeline import clean_llm_answer, validate_content_grounding
@@ -392,7 +1089,7 @@ Response:"""
         if plan.source_spec.is_explicit and not plan.source_spec.is_resolved:
             source_display = plan.source_spec.source_hint or "requested"
             if str(source_display).startswith("UNRESOLVED_"):
-                clean_name = str(source_display).replace("UNRESOLVED_SOURCE_", "").replace("UNRESOLVED_AUDIO_SOURCE", "").strip()
+                clean_name = str(source_display).replace("UNRESOLVED_SOURCE_", "").strip()                
                 source_display = clean_name.capitalize() if clean_name else "requested"
             unresolved_msg = f"I couldn't identify the '{source_display}' file, so I won't summarize a different file to answer this question."
             update_last_interaction(question, unresolved_msg, [], plan.modality.value)
@@ -400,19 +1097,18 @@ Response:"""
                 return {"answer": unresolved_msg, "sources": [], "num_chunks": 0, "type": "text", "images": []}
             return unresolved_msg, [], 0
 
-        # If source is specified and resolved, fetch its complete text/transcript for summarization
+        # If source is specified and resolved, fetch its complete source content for summarization
         if canonical_path and os.path.exists(canonical_path):
             src_name = os.path.basename(canonical_path)
 
             if plan.modality == Modality.IMAGE:
                 return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
 
-            full_transcript, total_chunks, _ = get_full_transcript_for_source(canonical_path)
-            if full_transcript and len(full_transcript.strip()) > 0:
-                summary_prompt = f"""Summarize the following document/audio context in response to the user's request.
-
+            full_content, total_chunks, _ = get_full_content_for_source(canonical_path)
+            if full_content and len(full_content.strip()) > 0:
+                summary_prompt = f"""Summarize the following document context in response to the user's request.
 Retrieved Context from {src_name}:
-{full_transcript}
+{full_content}
 
 User Request: {question}
 
@@ -424,10 +1120,10 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
                     try:
                         raw_summary = ask_llama(summary_prompt)
                     except Exception as e:
-                        raw_summary = f"Summary of {src_name}:\n{full_transcript[:1000]}"
+                        raw_summary = f"Summary of {src_name}:\n{full_content[:1000]}"
 
                 clean_summary = clean_llm_answer(raw_summary)
-                validate_content_grounding(full_transcript, clean_summary, question, canonical_path)
+                validate_content_grounding(full_content, clean_summary, question, canonical_path)
 
                 update_last_interaction(question, clean_summary, [src_name], plan.modality.value)
                 if return_structured:
@@ -521,64 +1217,115 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
         if plan.intent == QueryIntent.IMAGE_DISPLAY:
             return IntentRouter._handle_image_display(plan, question, analysis, return_structured)
 
-        # If audio source is resolved, retrieve full transcript context
-        if plan.modality == Modality.AUDIO and canonical_path and os.path.exists(canonical_path):
-            full_transcript, total_chunks, _ = get_full_transcript_for_source(canonical_path)
-            if full_transcript:
-                src_name = os.path.basename(canonical_path)
-                sources = [src_name]
-                context_str = full_transcript
-                num_chunks = total_chunks
-            else:
-                sources = []
-                context_str = ""
-                num_chunks = 0
-        else:
-            preferred_sources = []
-            rejected_sources = []
+        # Source-restricted hybrid retrieval
+        # ---------------------------------------------------------
+        # Unified retrieval for QA
+        # ---------------------------------------------------------
+        # IMPORTANT:
+        # Do NOT send an entire source file to the LLM for        # ordinary QA. Source resolution and retrieval are separate:
+        #
+        #   resolved source -> hard filter -> hybrid retrieval
+        #   -> reranking -> relevant chunks -> LLM
+        #
+        # Complete-file requests are handled separately by
+        # _handle_full_content() / _handle_summarization().
+        # ---------------------------------------------------------
 
-            feedback_candidates = search_feedback(question, query_modality=plan.modality.value, source_hint=source_hint, limit=5)
-            if feedback_candidates:
-                for fb in feedback_candidates:
-                    c_src = fb.get("correct_source")
-                    w_src = fb.get("wrong_source")
-                    if c_src and c_src not in preferred_sources:
-                        if not source_hint or c_src.lower() == source_hint.lower() or os.path.basename(c_src).lower() == os.path.basename(source_hint).lower():
-                            preferred_sources.append(c_src)
-                    if w_src and w_src not in rejected_sources:
-                        rejected_sources.append(w_src)
+        preferred_sources = []
+        rejected_sources = []
 
-            if source_hint and source_hint not in preferred_sources:
-                preferred_sources.append(source_hint)
+        feedback_candidates = search_feedback(
+            question,
+            query_modality=plan.modality.value,
+            source_hint=source_hint,
+            limit=5
+        )
 
-            results = search(
-                question,
-                max_results=10,
-                analysis=analysis,
-                preferred_sources=preferred_sources,
-                rejected_sources=rejected_sources
+        if feedback_candidates:
+            for fb in feedback_candidates:
+                correct_source = fb.get("correct_source")
+                wrong_source = fb.get("wrong_source")
+
+                if (
+                    correct_source
+                    and correct_source not in preferred_sources
+                ):
+                    # Feedback may influence ranking only when it is
+                    # compatible with the already-resolved source.
+                    if (
+                        not source_hint
+                        or correct_source.lower() == source_hint.lower()
+                        or os.path.basename(correct_source).lower()
+                        == os.path.basename(source_hint).lower()
+                    ):
+                        preferred_sources.append(correct_source)
+
+                if (
+                    wrong_source
+                    and wrong_source not in rejected_sources
+                ):
+                    rejected_sources.append(wrong_source)
+
+        if source_hint and source_hint not in preferred_sources:
+            preferred_sources.append(source_hint)
+
+        results = search(
+            question,
+            max_results=10,
+            analysis=analysis,
+            preferred_sources=preferred_sources,
+            rejected_sources=rejected_sources
+        )
+
+        if not results:
+            target_source = source_hint or "the requested file"
+
+            is_img_source = (
+                plan.modality == Modality.IMAGE
+                or (
+                    target_source
+                    and target_source.lower().endswith(
+                        (".jpg", ".jpeg", ".png", ".webp")
+                    )
+                )
             )
 
-            if not results:
-                target_source = source_hint if source_hint else "the requested file"
-                is_img_source = (plan.modality == Modality.IMAGE) or (target_source and target_source.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))
-                no_res_msg = f"No usable visual information was found for {target_source}." if is_img_source else f"No relevant content was found in {target_source}."
-                update_last_interaction(question, no_res_msg, [target_source], plan.modality.value)
+            no_res_msg = (
+                f"No usable visual information was found for {target_source}."
+                if is_img_source
+                else f"No relevant content was found in {target_source}."
+            )
 
-                if return_structured:
-                    return {"answer": no_res_msg, "sources": [target_source], "num_chunks": 0, "type": "text", "images": []}
-                return no_res_msg, [target_source], 0
+            update_last_interaction(
+                question,
+                no_res_msg,
+                [target_source],
+                plan.modality.value
+            )
 
-            retrieved_sources_set = set()
-            context_list = []
-            for doc in results:
-                fname = os.path.basename(doc["path"])
-                retrieved_sources_set.add(fname)
-                context_list.append(doc["text"])
+            if return_structured:
+                return {
+                    "answer": no_res_msg,
+                    "sources": [target_source],
+                    "num_chunks": 0,
+                    "type": "text",
+                    "images": []
+                }
 
-            sources = sorted(list(retrieved_sources_set))
-            context_str = "\n\n".join(context_list)
-            num_chunks = len(results)
+            return no_res_msg, [target_source], 0
+
+        # Build context ONLY from retrieved relevant chunks.
+        retrieved_sources_set = set()
+        context_list = []
+
+        for doc in results:
+            fname = os.path.basename(doc["path"])
+            retrieved_sources_set.add(fname)
+            context_list.append(doc["text"])
+
+        sources = sorted(list(retrieved_sources_set))
+        context_str = "\n\n".join(context_list)
+        num_chunks = len(results)
 
         source_context_label = f"Source File: {os.path.basename(canonical_path)}\n" if canonical_path else ""
 
@@ -587,22 +1334,20 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
         )
 
         if is_hindi_question:
-            translated_hint = "What was discussed in this audio recording / call?" if any(w in question.lower() for w in ["baatein", "discuss", "hua", "summary", "con call"]) else question
-            lang_instruction = (
-                f"The user asked in Hindi/Hinglish: '{question}' (Meaning: '{translated_hint}'). "
-                "Provide a clear, helpful, and strictly grounded summary/answer in natural Hindi or Hinglish based ONLY on facts in the retrieved context."
-            )
+                    lang_instruction = (
+                        f"The user asked in Hindi/Hinglish: '{question}'. "
+                        "Provide a clear, helpful, and strictly grounded answer in natural Hindi or Hinglish "
+                        "based ONLY on facts in the retrieved context."
+                    )
         else:
             lang_instruction = "Respond in clear, professional English."
-
         prompt = (
             "Answer the user's question using ONLY the retrieved context below.\n\n"
             "STRICT GROUNDING RULES:\n"
             "1. Rely strictly on facts explicitly stated in the retrieved context. Never invent meanings, dates, numbers, company names, family names, or personal names.\n"
             "2. Identify topics, people, and events directly from the text.\n"
             "3. If the user asks for names, aliases, or background of a person or entity, list ONLY the exact names explicitly stated in the context text.\n"
-            "4. If the transcript or context text contains noisy ASR words or unclear names, preserve the raw transcript wording or state that the name is unclear.\n"
-            f"5. {lang_instruction}\n\n"
+            "4. If the context contains unclear names or uncertain wording, preserve the retrieved wording or state that the information is unclear.\n"            f"5. {lang_instruction}\n\n"
             f"{source_context_label}Retrieved Context:\n"
             f"{context_str}\n\n"
             f"Question: {question}\n\n"
@@ -616,13 +1361,17 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
         )
 
         try:
-            raw_answer = ask_gemini(prompt)
+            raw_answer = ask_gemini(
+                grounded_sys_instruction + "\n\n" + prompt
+            )
         except Exception:
             try:
-                raw_answer = ask_llama(prompt, system_instruction=grounded_sys_instruction)
+                raw_answer = ask_llama(
+                    prompt,
+                    system_instruction=grounded_sys_instruction
+                )
             except Exception as e:
                 raw_answer = f"LLM Error: {str(e)}"
-
         clean_answer = clean_llm_answer(raw_answer)
         validate_content_grounding(context_str, clean_answer, question, canonical_path or "")
 
@@ -638,11 +1387,11 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
                         "timestamp": doc.get("timestamp", ""),
                         "text": doc.get("text", "")
                     })
-            elif 'full_transcript' in locals() and full_transcript:
+            elif 'full_content' in locals() and full_content:
                 evidence_list.append({
-                    "source": os.path.basename(canonical_path) if canonical_path else "Audio",
+                    "source": os.path.basename(canonical_path) if canonical_path else "Unknown source",
                     "chunk_id": 1,
-                    "text": full_transcript
+                    "text": full_content
                 })
             return {
                 "answer": clean_answer,
@@ -654,3 +1403,108 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
             }
 
         return clean_answer, sources, num_chunks
+    @staticmethod
+    def _handle_file_count(plan, question, analysis, return_structured=False):
+        import os
+
+        watched_folder = os.path.abspath("watched_folder")
+
+        if not os.path.isdir(watched_folder):
+            answer = "The watched folder does not exist."
+
+            if return_structured:
+                return {
+                    "type": "text",
+                    "answer": answer,
+                    "sources": [],
+                }
+
+            return answer, [], 0
+
+        extension_groups = {
+            "image": {
+                ".jpg", ".jpeg", ".png", ".webp",
+                ".gif", ".bmp", ".tiff", ".tif"
+            },
+            
+            "pdf": {
+                ".pdf"
+            },
+            "document": {
+                ".doc", ".docx", ".txt",
+                ".md", ".rtf"
+            },
+            "spreadsheet": {
+                ".xls", ".xlsx", ".csv", ".ods"
+            },
+        }
+
+        question_lower = question.lower()
+
+        requested_type = None
+
+        if any(word in question_lower for word in [
+            "image", "images",
+            "photo", "photos",
+            "picture", "pictures"
+        ]):
+            requested_type = "image"
+
+
+        elif any(word in question_lower for word in [
+            "pdf", "pdfs"
+        ]):
+            requested_type = "pdf"
+
+        elif any(word in question_lower for word in [
+            "document", "documents",
+            "doc", "docs"
+        ]):
+            requested_type = "document"
+
+        elif any(word in question_lower for word in [
+            "spreadsheet", "spreadsheets",
+            "excel", "xlsx"
+        ]):
+            requested_type = "spreadsheet"
+
+        if requested_type:
+            extensions = extension_groups[requested_type]
+
+            count = 0
+
+            for root, dirs, files in os.walk(watched_folder):
+                for filename in files:
+                    extension = os.path.splitext(filename)[1].lower()
+
+                    if extension in extensions:
+                        count += 1
+
+            if requested_type == "image":
+                answer = f"There are {count} images in the folder."
+            elif requested_type == "pdf":
+                answer = f"There are {count} PDF files in the folder."
+            elif requested_type == "document":
+                answer = f"There are {count} documents in the folder."
+            elif requested_type == "spreadsheet":
+                answer = f"There are {count} spreadsheets in the folder."
+            else:
+                answer = f"There are {count} files in the folder."
+
+        else:
+            # Generic "how many files?"
+            count = 0
+
+            for root, dirs, files in os.walk(watched_folder):
+                count += len(files)
+
+            answer = f"There are {count} files in the folder."
+
+        if return_structured:
+            return {
+                "type": "text",
+                "answer": answer,
+                "sources": [],
+            }
+
+        return answer, [], 0    
