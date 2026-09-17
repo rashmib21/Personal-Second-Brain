@@ -273,9 +273,22 @@ class IntentRouter:
             # This handler must NOT re-examine the raw query for intent signals.
             return IntentRouter._handle_image_display(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.IMAGE_FACE_QUERY:
-            # Face queries are classified by QueryAnalyzer and handled using
-            # the typed FaceIntent stored in QueryPlan.
-            return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
+            # Face queries are classified by QueryAnalyzer and dispatched
+            # according to the typed FaceIntent stored in QueryPlan.
+            if plan.face_intent == FaceIntent.SEARCH:
+                return IntentRouter._handle_face_search(
+                    plan,
+                    question,
+                    analysis,
+                    return_structured
+                )
+
+            return IntentRouter._handle_visual_qa(
+                plan,
+                question,
+                analysis,
+                return_structured
+            )
         elif plan.intent == QueryIntent.VISUAL_QA:
             return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.SUMMARIZATION:
@@ -707,6 +720,129 @@ class IntentRouter:
         if return_structured:
             return {"answer": empty_msg, "sources": [src_name], "num_chunks": 0, "type": "text", "images": []}
         return empty_msg, [src_name], 0
+
+    @staticmethod
+    def _handle_face_search(
+        plan: QueryPlan,
+        question: str,
+        analysis: Dict[str, Any],
+        return_structured: bool
+    ) -> Union[Tuple[str, list, int], Dict[str, Any]]:
+        """
+        Handle cross-image face-memory search.
+
+        QueryAnalyzer owns interpretation of the request.
+        This handler consumes the typed FaceIntent and person name,
+        then delegates matching to the existing persistent face-memory
+        search implementation.
+        """
+        from app.search.face_search import search_images_by_face
+
+        results = search_images_by_face(
+            question,
+            max_results=10
+        )
+
+        if not results:
+            person_name = plan.face_person_name
+
+            if person_name:
+                msg = (
+                    f"I couldn't find any images containing a stored "
+                    f"face match for {person_name}."
+                )
+            else:
+                msg = "I couldn't find any images containing faces."
+
+            update_last_interaction(
+                question,
+                msg,
+                [],
+                "image"
+            )
+
+            if return_structured:
+                return {
+                    "answer": msg,
+                    "sources": [],
+                    "num_chunks": 0,
+                    "type": "image",
+                    "images": []
+                }
+
+            return msg, [], 0
+
+        image_items = []
+        sources = []
+
+        for item in results:
+            image_path = item.get("image_path") or item.get("path")
+
+            if not image_path:
+                continue
+
+            source_name = item.get("source") or os.path.basename(image_path)
+
+            image_items.append({
+                "type": "image",
+                "path": image_path,
+                "source": source_name
+            })
+
+            sources.append(source_name)
+
+        if not image_items:
+            msg = (
+                "I found face-memory matches, but no usable image "
+                "files were available."
+            )
+
+            update_last_interaction(
+                question,
+                msg,
+                [],
+                "image"
+            )
+
+            if return_structured:
+                return {
+                    "answer": msg,
+                    "sources": [],
+                    "num_chunks": 0,
+                    "type": "text",
+                    "images": []
+                }
+
+            return msg, [], 0
+
+        person_name = plan.face_person_name
+
+        if person_name:
+            msg = (
+                f"I found {len(image_items)} image(s) containing "
+                f"{person_name}."
+            )
+        else:
+            msg = f"I found {len(image_items)} image(s) containing faces."
+
+        update_last_interaction(
+            question,
+            msg,
+            sources,
+            "image"
+        )
+
+        if return_structured:
+            return {
+                "answer": msg,
+                "sources": sources,
+                "num_chunks": len(image_items),
+                "type": "image",
+                "images": image_items
+            }
+
+        return msg, sources, len(image_items)
+
 
     @staticmethod
     def _handle_visual_qa(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
