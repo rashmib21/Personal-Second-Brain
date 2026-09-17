@@ -4,6 +4,11 @@ import uuid
 import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Keep lifecycle tests completely isolated from the production database.
+TEST_DB_PATH = os.path.join(BASE_DIR, "test_database")
+os.environ["PERSONAL_SECOND_BRAIN_DB_PATH"] = TEST_DB_PATH
+
 sys.path.insert(0, BASE_DIR)
 
 from app.storage.lancedb_store import (

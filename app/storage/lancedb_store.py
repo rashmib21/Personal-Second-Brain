@@ -6,7 +6,10 @@ from config import DEBUG
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DB_PATH = os.path.join(BASE_DIR, "database")
+DB_PATH = os.environ.get(
+    "PERSONAL_SECOND_BRAIN_DB_PATH",
+    os.path.join(BASE_DIR, "database")
+)
 
 TABLE_NAME="documents"
 HASH_TABLE_NAME="processed_files"
