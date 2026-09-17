@@ -4,6 +4,11 @@ import pytest
 import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Keep architectural tests completely isolated from the production database.
+TEST_DB_PATH = os.path.join(BASE_DIR, "test_database")
+os.environ["PERSONAL_SECOND_BRAIN_DB_PATH"] = TEST_DB_PATH
+
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
