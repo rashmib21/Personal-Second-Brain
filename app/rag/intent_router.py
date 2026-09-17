@@ -1149,7 +1149,7 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
         retrieved_sources = last_state.get("retrieved_sources", [])
 
         wrong_source = prev_source if prev_source else (retrieved_sources[0] if retrieved_sources else "")
-        has_explicit_filename = bool(re.search(r"\b[a-zA-Z0-9_\-]+\.(jpg|jpeg|png|webp|m4a|mp3|wav|mpeg|pdf|docx|xlsx)\b", question.lower()))
+        has_explicit_filename = bool(re.search(r"\b[a-zA-Z0-9_\-]+\.(jpg|jpeg|png|webp|gif|bmp|tiff?|pdf|doc|docx|txt|md|rtf|xls|xlsx|csv|ods|ppt|pptx)\b", question.lower()))
         if has_explicit_filename and plan.source_spec.canonical_path and os.path.exists(plan.source_spec.canonical_path):
             correct_source = os.path.basename(plan.source_spec.canonical_path)
         elif prev_source:
