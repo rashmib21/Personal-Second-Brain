@@ -1604,6 +1604,7 @@ def analyze_query(question, indexed_files=None):
         INTENT_TEMPORAL_FILE_QUERY: QueryIntent.METADATA_QUERY,
         INTENT_IMAGE_FILENAME_QUERY: QueryIntent.METADATA_QUERY,
         INTENT_IMAGE_COUNT_QUERY: QueryIntent.METADATA_QUERY,
+        INTENT_IMAGE_FACE_QUERY: QueryIntent.IMAGE_FACE_QUERY,
         # IMAGE_DISPLAY is registered as a plain string because it is a new enum value.
         # This mapping is the single place where it resolves to QueryIntent.IMAGE_DISPLAY.
         "IMAGE_DISPLAY": QueryIntent.IMAGE_DISPLAY,
