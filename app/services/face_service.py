@@ -254,8 +254,18 @@ def search_images_by_registered_face(person_name, threshold=FACE_COSINE_DISTANCE
     if df.empty:
         return []
 
-    # Fetch registered reference embeddings for target person
-    person_records = df[df["person_name"].str.lower() == person_name.lower()]
+    # Fetch ONLY explicitly registered reference embeddings for the target person.
+    # Unknown/detected faces must never become identity references merely because
+    # their person_name field happens to contain the same name.
+    person_records = df[
+        df["person_name"].fillna("").astype(str).str.strip().str.lower().eq(
+            person_name.strip().lower()
+        )
+        & df["status"].fillna("").astype(str).str.strip().str.lower().eq("known")
+        & df["identity_source"].fillna("").astype(str).str.strip().str.lower().eq(
+            "user_registration"
+        )
+    ]
     if person_records.empty:
         if DEBUG:
             print(f"No registered face memory record found for person '{person_name}'.")
