@@ -8,10 +8,15 @@ from app.query.query_plan import (
     QueryPlan,
     QueryIntent,
     QueryOperation,
+    FaceIntent,
     RequestScope,
     Modality,
     SourceSpec,
     QueryFilters,
+)
+from app.search.face_search import (
+    is_face_search_query,
+    extract_person_name_from_question,
 )
 
 # ============================================================
@@ -1498,11 +1503,70 @@ def analyze_query(question, indexed_files=None):
         is_ocr_query
     )
 
+    # ------------------------------------------------------------
+    # Face query classification
+    # ------------------------------------------------------------
+    # Face-specific interpretation belongs to Query Understanding.
+    # Handlers consume this structured result instead of reparsing
+    # the user's natural-language question.
+    face_intent = FaceIntent.NONE
+    face_person_name = None
+
+    face_count_patterns = (
+        r"\bhow\s+many\s+(?:people|persons|person|faces)\b",
+        r"\bnumber\s+of\s+(?:people|persons|person|faces)\b",
+        r"\bcount\s+(?:the\s+)?(?:people|persons|person|faces)\b",
+    )
+
+    face_presence_patterns = (
+        r"\bis\s+there\s+(?:a\s+)?person\b",
+        r"\bis\s+there\s+anyone\b",
+        r"\bare\s+there\s+people\b",
+        r"\bis\s+anyone\b",
+        r"\bdoes\s+the\s+image\s+contain\s+(?:a\s+)?person\b",
+        r"\bdoes\s+the\s+image\s+contain\s+people\b",
+    )
+
+    face_identity_patterns = (
+        r"\bwho\s+is\b",
+        r"\bwho\s+are\b",
+        r"\bwhose\s+face\b",
+        r"\bidentify\b",
+        r"\brecognize\b",
+        r"\bwhich\s+person\b",
+        r"\bis\s+this\s+person\b",
+    )
+
+    if any(re.search(pattern, question_lower) for pattern in face_count_patterns):
+        face_intent = FaceIntent.COUNT
+
+    elif any(re.search(pattern, question_lower) for pattern in face_presence_patterns):
+        face_intent = FaceIntent.PRESENCE
+
+    else:
+        face_person_name = extract_person_name_from_question(question)
+
+        if (
+            face_person_name is not None
+            or any(
+                re.search(pattern, question_lower)
+                for pattern in face_identity_patterns
+            )
+        ):
+            face_intent = FaceIntent.IDENTIFICATION
+
+        elif is_face_search_query(question):
+            face_intent = FaceIntent.SEARCH
+
+    if face_intent != FaceIntent.NONE:
+        intent = INTENT_IMAGE_FACE_QUERY
+
     analysis_result = {
         "intent": intent,
         "request_scope": request_scope,
         "temporal_intent": temporal_intent,
-        "face_intent": "none",
+        "face_intent": face_intent.value,
+        "face_person_name": face_person_name,
         "is_visual_qa": is_visual_qa,
         "is_ocr_query": is_ocr_query,
         "is_image_summary_query": is_image_summary_query,
@@ -1657,6 +1721,8 @@ def analyze_query(question, indexed_files=None):
         scope=target_scope_enum,
         modality=target_modality_enum,
         file_type=file_type,
+        face_intent=face_intent,
+        face_person_name=face_person_name,
         source_spec=SourceSpec(
             source_hint=source_hint,
             canonical_path=canonical_source_id if resolved_file_exists else None,

@@ -31,6 +31,14 @@ class QueryIntent(str, Enum):
     QUESTION_ANSWERING = "QUESTION_ANSWERING"
     CORRECTION = "CORRECTION"
 
+class FaceIntent(str, Enum):
+    NONE = "none"
+    COUNT = "face_count"
+    IDENTIFICATION = "face_identification"
+    PRESENCE = "face_presence"
+    SEARCH = "face_search"
+
+
 class RequestScope(str, Enum):
     """
     Defines the structural scope of information requested by the user.
@@ -96,8 +104,10 @@ class QueryPlan:
     scope: RequestScope
     modality: Modality
     file_type: Optional[str]
-    source_spec: SourceSpec
-    filters: QueryFilters
+    face_intent: FaceIntent = FaceIntent.NONE
+    face_person_name: Optional[str] = None
+    source_spec: SourceSpec = field(default_factory=SourceSpec)
+    filters: QueryFilters = field(default_factory=QueryFilters)
     is_correction: bool = False
     correction_details: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -112,7 +122,8 @@ class QueryPlan:
             "operation": self.operation.value,
             "request_scope": self.scope.value.lower(),
             "temporal_intent": "TEMPORAL_FILE_QUERY" if self.intent == QueryIntent.METADATA_QUERY else "none",
-            "face_intent": "none",
+            "face_intent": self.face_intent.value,
+            "face_person_name": self.face_person_name,
             "is_visual_qa": self.intent == QueryIntent.VISUAL_QA,
             "is_ocr_query": self.metadata.get("is_ocr_query", False),
             "is_image_summary_query": self.intent == QueryIntent.SUMMARIZATION and self.modality == Modality.IMAGE,
