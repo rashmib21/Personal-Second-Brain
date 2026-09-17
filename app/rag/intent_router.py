@@ -272,6 +272,10 @@ class IntentRouter:
             # Dedicated image retrieval handler: returns actual image path to the frontend.
             # This handler must NOT re-examine the raw query for intent signals.
             return IntentRouter._handle_image_display(plan, question, analysis, return_structured)
+        elif plan.intent == QueryIntent.IMAGE_FACE_QUERY:
+            # Face queries are classified by QueryAnalyzer and handled using
+            # the typed FaceIntent stored in QueryPlan.
+            return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.VISUAL_QA:
             return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
         elif plan.intent == QueryIntent.SUMMARIZATION:
