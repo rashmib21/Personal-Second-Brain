@@ -1,4 +1,5 @@
 import ollama
+import re
 from PIL import Image
 import tempfile
 import os
@@ -59,12 +60,55 @@ def summarize_image(image_path, question=None):
 
     try:
         if question and question.strip():
-            is_summary_or_text_req = any(w in question.lower() for w in [
+            question_lower = question.strip().lower()
+
+            # Generic "what is <image-file>?" means:
+            # describe what is actually shown in the image.
+            #
+            # This is intentionally generic and does not depend on any
+            # particular filename such as mummy.jpg.
+            generic_image_description = bool(
+                re.match(
+                    r"^\s*what\s+is\s+.+?\.(jpg|jpeg|png|webp|gif|bmp|tiff?)\s*[?.!]*\s*$",
+                    question_lower,
+                    re.IGNORECASE
+                )
+            )
+
+            is_summary_or_text_req = any(w in question_lower for w in [
                 "summarize", "summarise", "summary", "describe", "overview",
                 "text", "read", "transcribe", "writing", "content", "words", "letter",
                 "inside", "say", "written", "code", "topic", "kafka", "redis"
             ])
-            if is_summary_or_text_req:
+
+            if generic_image_description:
+                prompt = """You are a Vision Language Assistant.
+
+Analyze the provided image itself and describe what is visibly shown in it.
+
+The user's question uses "What is <image filename>?".
+For an image file, interpret this as a request to describe the image,
+NOT as a request to explain the filename or file type.
+
+Rules:
+- Describe the actual visual contents of the image.
+- Identify the main people, objects, scene, setting, clothing,
+  colors, visible text, and other clearly observable details.
+- If people are visible, describe them without guessing their names
+  or personal identities.
+- Do not invent information.
+- Do not answer based on the filename.
+- Do not say that information is unavailable merely because the
+  filename itself has no meaning.
+- If visible text exists, include relevant readable text.
+- Keep the description grounded strictly in the image.
+
+User Question:
+{question}
+
+Answer:""".format(question=question.strip())
+
+            elif is_summary_or_text_req:
                 prompt = f"""You are a Vision Language Assistant.
 
 Analyze the provided image carefully and fulfill the request. If the image contains handwritten or printed text, diagrams, or code, read and transcribe the visible information thoroughly.
@@ -137,8 +181,12 @@ Rules:
         return response["message"]["content"].strip()
 
     except Exception as e:
-        source_name = os.path.basename(image_path)
-        return f"No usable visual information was found for {source_name}."
+        import traceback
+        print("\n[IMAGE VLM ERROR]")
+        print(f"Type: {type(e).__name__}")
+        print(f"Error: {e}")
+        traceback.print_exc()
+        return f"No usable visual information was found for {os.path.basename(image_path)}."
 
     finally:
 
