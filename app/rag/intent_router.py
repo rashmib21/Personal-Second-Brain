@@ -168,7 +168,11 @@ class IntentRouter:
 
         pending_faces = get_pending_faces()
 
-        if pending_faces and plan.intent == QueryIntent.FACE_OPERATIONS:
+        if (
+            pending_faces
+            and plan.intent == QueryIntent.IMAGE_FACE_QUERY
+            and plan.face_intent == FaceIntent.IDENTIFICATION
+        ):
             return IntentRouter._handle_visual_qa(
                 plan,
                 question,
