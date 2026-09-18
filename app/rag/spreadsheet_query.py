@@ -201,6 +201,68 @@ def _get_headers(rows):
     return list(rows[0].keys())
 
 
+def _validate_requested_numeric_field(rows, question):
+    """
+    Validate that a requested numeric field actually exists.
+
+    Important:
+    - salary must resolve to a real salary column
+    - ctc must resolve to a real CTC column
+    - package must resolve to a real package column
+    - lpa may resolve to an LPA/CTC(LPA) column
+
+    Never silently substitute CTC for salary.
+    """
+    if not rows:
+        return None
+
+    headers = _get_headers(rows)
+    question_lower = question.lower()
+
+    requested = None
+
+    if re.search(r"\bsalary\b", question_lower):
+        requested = (
+            "salary",
+            ("Salary", "Monthly Salary", "Annual Salary",
+             "Base Salary", "Salary (LPA)", "Annual Salary (LPA)")
+        )
+    elif re.search(r"\bctc\b", question_lower):
+        requested = (
+            "CTC",
+            ("CTC (LPA)", "CTC")
+        )
+    elif re.search(r"\bpackage\b", question_lower):
+        requested = (
+            "package",
+            ("Package", "Package (LPA)")
+        )
+    elif re.search(r"\blpa\b", question_lower):
+        requested = (
+            "LPA",
+            ("LPA", "Salary (LPA)", "CTC (LPA)")
+        )
+
+    if requested is None:
+        return None
+
+    field_name, candidates = requested
+    column = _find_column(headers, *candidates)
+
+    if column is None:
+        return {
+            "field": field_name,
+            "column": None,
+            "available_columns": headers,
+        }
+
+    return {
+        "field": field_name,
+        "column": column,
+        "available_columns": headers,
+    }
+
+
 def filter_rows(rows, question):
     if not rows:
         return []
@@ -509,6 +571,133 @@ def _requested_numeric_field(headers, question):
         )
 
     return None
+
+
+def is_single_ranking_query(question):
+    """
+    Return True when the user asks for one best/worst row,
+    rather than asking to sort the entire spreadsheet.
+    """
+    q = question.lower()
+
+    directional_sort = bool(
+        re.search(
+            r"\b(?:highest|lowest|largest|smallest)\s+to\s+"
+            r"(?:lowest|highest|largest|smallest)\b",
+            q
+        )
+        or re.search(r"\b(?:ascending|descending)\b", q)
+    )
+
+    explicit_top_n = bool(
+        re.search(r"\btop\s+\d+\b", q)
+        or re.search(r"\bbottom\s+\d+\b", q)
+    )
+
+    single_rank = bool(
+        re.search(
+            r"\b(?:highest|lowest|largest|smallest|maximum|minimum|max|min)\b",
+            q
+        )
+    )
+
+    return single_rank and not directional_sort and not explicit_top_n
+
+
+def requested_result_limit(question):
+    """
+    Return the number of rows requested by a ranking query.
+
+    Examples:
+      highest CTC -> 1
+      lowest salary -> 1
+      top 5 CTC -> 5
+      bottom 3 CTC -> 3
+      normal sort -> None
+    """
+    q = question.lower()
+
+    match = re.search(r"\btop\s+(\d+)\b", q)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"\bbottom\s+(\d+)\b", q)
+    if match:
+        return int(match.group(1))
+
+    if is_single_ranking_query(q):
+        return 1
+
+    return None
+
+
+def format_ranking_result(rows, question):
+    """
+    Format ranking results using only the columns relevant
+    to the user's question.
+
+    Example:
+      Which company has the highest CTC?
+      -> Postman | CTC: 10–20
+    """
+    if not rows:
+        return "No matching rows were found."
+
+    headers = _get_headers(rows)
+    q = question.lower()
+
+    # Resolve the requested numeric field.
+    requested = None
+
+    if re.search(r"\bsalary\b", q):
+        requested = _find_column(
+            headers,
+            "Salary",
+            "Monthly Salary",
+            "Annual Salary",
+            "Base Salary",
+            "Salary (LPA)",
+            "Annual Salary (LPA)"
+        )
+    elif re.search(r"\bctc\b", q):
+        requested = _find_column(
+            headers,
+            "CTC (LPA)",
+            "CTC"
+        )
+    elif re.search(r"\bpackage\b", q):
+        requested = _find_column(
+            headers,
+            "Package",
+            "Package (LPA)"
+        )
+    elif re.search(r"\blpa\b", q):
+        requested = _find_column(
+            headers,
+            "LPA",
+            "Salary (LPA)",
+            "CTC (LPA)"
+        )
+
+    # Resolve the entity/name column generically.
+    name_column = _find_column(
+        headers,
+        "Company Name",
+        "Company",
+        "Employee Name",
+        "Employee",
+        "Name",
+        "Person Name"
+    )
+
+    if requested and name_column:
+        return (
+            f"{name_column}: {rows[0].get(name_column, '')} | "
+            f"{requested}: {rows[0].get(requested, '')}"
+        )
+
+    # Fallback: return the first row without dumping the entire sheet.
+    return format_rows(rows[:1])
 
 
 def sort_rows(rows, question):

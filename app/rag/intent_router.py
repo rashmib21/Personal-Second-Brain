@@ -512,7 +512,47 @@ class IntentRouter:
             return msg, [source_name], 0
 
         # ---------------------------------------------------------
-        # 5. Deterministic filtering
+        # 5. Validate requested spreadsheet fields before filtering
+        # ---------------------------------------------------------
+        # Never execute a numeric query against a semantically
+        # different column. For example, "salary" must not silently
+        # become "CTC (LPA)".
+        from app.rag.spreadsheet_query import _validate_requested_numeric_field
+
+        numeric_field = _validate_requested_numeric_field(
+            rows,
+            question
+        )
+
+        if numeric_field and numeric_field["column"] is None:
+            requested_field = numeric_field["field"]
+
+            msg = (
+                f"The spreadsheet '{os.path.basename(canonical_path)}' "
+                f"does not contain a '{requested_field}' column, so I "
+                f"cannot answer this query reliably from this file."
+            )
+
+            update_last_interaction(
+                question,
+                msg,
+                [os.path.basename(canonical_path)],
+                plan.modality.value
+            )
+
+            if return_structured:
+                return {
+                    "answer": msg,
+                    "sources": [os.path.basename(canonical_path)],
+                    "num_chunks": 0,
+                    "type": "text",
+                    "images": []
+                }
+
+            return msg, [os.path.basename(canonical_path)], 0
+
+        # ---------------------------------------------------------
+        # 6. Deterministic filtering
         # ---------------------------------------------------------
         filtered_rows = filter_rows(
             rows,
