@@ -451,6 +451,66 @@ def _ctc_sort_key(value):
     )
 
 
+def _find_numeric_column(headers, *names):
+    """
+    Find a numeric compensation/metric column only when the
+    requested semantic field actually exists in the spreadsheet.
+
+    This deliberately does NOT treat salary and CTC as synonyms.
+    """
+    return _find_column(headers, *names)
+
+
+def _requested_numeric_field(headers, question):
+    """
+    Resolve the numeric field requested by the user.
+
+    Important:
+    - salary -> Salary / Monthly Salary / Annual Salary
+    - ctc -> CTC
+    - package -> Package
+    - lpa -> LPA/CTC-style fields
+
+    Salary must never silently fall back to CTC.
+    """
+    question_lower = question.lower()
+
+    if re.search(r"\bsalary\b", question_lower):
+        return _find_numeric_column(
+            headers,
+            "Salary",
+            "Monthly Salary",
+            "Annual Salary",
+            "Base Salary",
+            "Salary (LPA)",
+            "Annual Salary (LPA)"
+        )
+
+    if re.search(r"\bctc\b", question_lower):
+        return _find_numeric_column(
+            headers,
+            "CTC (LPA)",
+            "CTC"
+        )
+
+    if re.search(r"\bpackage\b", question_lower):
+        return _find_numeric_column(
+            headers,
+            "Package",
+            "Package (LPA)"
+        )
+
+    if re.search(r"\blpa\b", question_lower):
+        return _find_numeric_column(
+            headers,
+            "LPA",
+            "Salary (LPA)",
+            "CTC (LPA)"
+        )
+
+    return None
+
+
 def sort_rows(rows, question):
     if not rows:
         return []
@@ -469,35 +529,26 @@ def sort_rows(rows, question):
 
     headers = _get_headers(rows)
 
-    # ---------------------------------------------------------
-    # CTC / PACKAGE / SALARY
-    # ---------------------------------------------------------
-    if re.search(
-        r"\b(?:ctc|package|salary|lpa)\b",
-        question_lower
-    ):
-        ctc_column = _find_column(
-            headers,
-            "CTC (LPA)",
-            "CTC",
-            "Package"
+    requested_column = _requested_numeric_field(
+        headers,
+        question
+    )
+
+    if requested_column:
+        descending = bool(
+            re.search(
+                r"\b(?:highest|descending|largest|max|maximum|highest to lowest)\b",
+                question_lower
+            )
         )
 
-        if ctc_column:
-            descending = bool(
-                re.search(
-                    r"\b(?:highest|descending|largest|max|highest to lowest)\b",
-                    question_lower
-                )
-            )
-
-            return sorted(
-                rows,
-                key=lambda row: _ctc_sort_key(
-                    row.get(ctc_column)
-                ),
-                reverse=descending
-            )
+        return sorted(
+            rows,
+            key=lambda row: _ctc_sort_key(
+                row.get(requested_column)
+            ),
+            reverse=descending
+        )
 
     return rows
 
