@@ -161,38 +161,6 @@ def extract_entity_tokens(text_input):
     return filtered_tokens
 
 
-def _source_token_matches_indexed_file(token, indexed_files):
-    """
-    Return True only when a query token actually resembles an indexed filename/stem.
-
-    A normal content word such as ``joins`` must never become an explicit source
-    reference merely because it survived stop-word filtering. Source resolution
-    should be data-driven from the indexed filenames, not from the vocabulary of
-    the user's question.
-    """
-    if not token or not indexed_files:
-        return False
-
-    token_norm = normalize_string(token)
-    token_compact = compact_alphanumeric(token)
-    if not token_norm or not token_compact:
-        return False
-
-    for filename in indexed_files:
-        stem = os.path.splitext(os.path.basename(filename))[0]
-        stem_norm = normalize_string(stem)
-        stem_compact = compact_alphanumeric(stem)
-
-        if token_norm == stem_norm or token_compact == stem_compact:
-            return True
-
-        stem_words = set(stem_norm.split())
-        if token_norm in stem_words:
-            return True
-
-    return False
-
-
 def calculate_token_similarity(token_a, token_b):
     """
     Calculates sequence similarity ratio between two tokens.
@@ -588,8 +556,6 @@ def infer_query_operation(
     if intent in {
         INTENT_FILE_LIST,
         INTENT_SOURCE_LOOKUP,
-        INTENT_FILE_METADATA,
-        INTENT_TEMPORAL_FILE_QUERY,
     }:
         return QueryOperation.LIST
 
@@ -694,12 +660,15 @@ def analyze_query(question, indexed_files=None):
     start_dt, end_dt, date_label = parse_date_expression(question_lower)
 
     file_list_patterns = [
+        r"\blist\s+(?:all\s+)?pdfs?\b",
+        r"\bshow\s+(?:all\s+)?pdfs?\b",
+        r"\blist\s+(?:all\s+)?spreadsheets?\b",
+        r"\bshow\s+(?:all\s+)?spreadsheets?\b",
+        r"\blist\s+(?:all\s+)?workbooks?\b",
+        r"\bshow\s+(?:all\s+)?workbooks?\b",
         r"\blist\s+(?:all\s+)?files?\b", r"\bshow\s+(?:all\s+)?files?\b", r"\blist\s+(?:all\s+)?images?\b", r"\bshow\s+(?:all\s+)?images?\b",
         r"\blist\s+(?:all\s+)?photos?\b", r"\bshow\s+(?:all\s+)?photos?\b", r"\blist\s+(?:all\s+)?pictures?\b", r"\bshow\s+(?:all\s+)?pictures?\b",
         r"\blist\s+(?:all\s+)?audio\b", r"\bshow\s+(?:all\s+)?audio\b", r"\blist\s+(?:all\s+)?documents?\b", r"\bshow\s+(?:all\s+)?documents?\b",
-        r"\blist\s+(?:all\s+)?pdfs?\b", r"\bshow\s+(?:all\s+)?pdfs?\b",
-        r"\blist\s+(?:all\s+)?spreadsheets?\b", r"\bshow\s+(?:all\s+)?spreadsheets?\b",
-        r"\blist\s+(?:all\s+)?(?:excel|xlsx|csv)\b", r"\bshow\s+(?:all\s+)?(?:excel|xlsx|csv)\b",
         r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\s+photos?\b", r"\bwhich\b.*\b(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
         r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\bphotos?\s+added\b", r"\baudio\s+added\b", r"\brecordings?\s+added\b",
         r"\brecent\s+files?\b", r"\blatest\s+files?\b", r"\bnewest\s+files?\b", r"\bmost\s+recent\b", r"\blast\s+files?\b",
@@ -751,7 +720,10 @@ def analyze_query(question, indexed_files=None):
     temporal_intent = "none"
     if is_count_temporal_query:
         temporal_intent = INTENT_FILE_COUNT
-    elif is_file_list_query:
+    elif start_dt is not None or any(
+        word in question_lower
+        for word in ["recent", "latest", "newest", "last"]
+    ):
         temporal_intent = INTENT_TEMPORAL_FILE_QUERY
 
     # Step 3: Modality & File Type Categorization
@@ -777,20 +749,12 @@ def analyze_query(question, indexed_files=None):
         "sheet", "sheets"
     ]
 
-    spreadsheet_modality_keywords = [
-        "spreadsheet", "spreadsheets", "workbook", "workbooks",
-        "excel", "xlsx", "xls", "csv",
-    ]
-
     if any(kw in question_lower for kw in image_keywords):
         modality = "image"
     elif any(kw in question_lower for kw in pdf_keywords):
         modality = "pdf"
-    elif any(kw in question_lower for kw in spreadsheet_modality_keywords):
-        modality = "spreadsheet"
     elif any(kw in question_lower for kw in doc_keywords):
         modality = "docx"
-
 
     # ============================================================
     spreadsheet_context_patterns = [
@@ -879,18 +843,14 @@ def analyze_query(question, indexed_files=None):
     # to say "Excel" in every query when the active source is an Excel
     # workbook.
     is_structured_spreadsheet_query = (
-        not is_file_list_query
-        and not is_count_temporal_query
-        and (
-            (
-                has_spreadsheet_context
-                and (has_spreadsheet_operation or has_spreadsheet_field)
-            )
-            or (
-                has_spreadsheet_operation
-                and has_spreadsheet_field
-                and modality in {"spreadsheet", "document", "all"}
-            )
+        (
+            has_spreadsheet_context
+            and (has_spreadsheet_operation or has_spreadsheet_field)
+        )
+        or (
+            has_spreadsheet_operation
+            and has_spreadsheet_field
+            and modality in {"spreadsheet", "document", "all"}
         )
     )
 
@@ -952,24 +912,82 @@ def analyze_query(question, indexed_files=None):
         )
     ]
 
-    # Do not treat every meaningful query word as a source reference.
-    # Only tokens that actually match an indexed filename/stem can promote
-    # a generic question into source-resolution mode. This prevents queries
-    # such as "Where did I mention joins?" from becoming a request for a
-    # nonexistent file named "joins".
-    source_matching_tokens = [
-        token
-        for token in meaningful_source_tokens
-        if _source_token_matches_indexed_file(token, indexed_files)
+    meaningful_source_name_found = bool(meaningful_source_tokens)
+
+
+    # ------------------------------------------------------------
+    # 3. Detect conversational/anaphoric source references
+    # ------------------------------------------------------------
+
+    anaphora_indicators = [
+        r"\bit\b",
+        r"\bthis\s+file\b",
+        r"\bthat\s+file\b",
+        r"\bthis\s+document\b",
+        r"\bthat\s+document\b",
+        r"\bthis\s+image\b",
+        r"\bthat\s+image\b",
+        r"\bthis\s+audio\b",
+        r"\bthat\s+audio\b",
+        r"\bthis\s+recording\b",
+        r"\bthat\s+recording\b",
+        r"\bthis\s+one\b",
+        r"\bthat\s+one\b",
     ]
-    meaningful_source_name_found = bool(source_matching_tokens)
+
+    has_anaphora = any(
+        re.search(pattern, question_lower)
+        for pattern in anaphora_indicators
+    )
+
 
     # ------------------------------------------------------------
-    # 3. Detect conversational/anaphoric source references (removed)
+    # 4. Resolve anaphora only from previous conversation state
     # ------------------------------------------------------------
-    # Conversational source resolution has been removed. No active source memory is used.
-    has_anaphora = False
 
+    if has_anaphora and source_hint is None:
+        try:
+            from app.services.interaction_state import get_last_interaction
+
+            last_state = get_last_interaction()
+            previous_source = None
+
+            if last_state:
+                previous_source = (
+                    last_state.get("previous_source")
+                    or last_state.get("canonical_source_id")
+                )
+
+                if not previous_source:
+                    retrieved_sources = last_state.get("retrieved_sources")
+                    if retrieved_sources:
+                        previous_source = retrieved_sources[0]
+
+            if previous_source:
+                previous_basename = os.path.basename(
+                    str(previous_source)
+                )
+
+                for fname in indexed_files:
+                    if fname.lower() == previous_basename.lower():
+                        source_hint = fname
+                        source_confidence = 1.0
+                        break
+
+                if source_hint is None:
+                    canonical_previous = resolve_canonical_source_id(
+                        previous_basename
+                    )
+
+                    if canonical_previous:
+                        source_hint = previous_basename
+                        source_confidence = 0.95
+
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve conversational source reference: %s",
+                exc
+            )
 
 
     # ------------------------------------------------------------
@@ -1061,16 +1079,12 @@ def analyze_query(question, indexed_files=None):
     # Structured spreadsheet queries are handled separately and must
     # never use entity tokens as source references.
 
-    if (
-        meaningful_source_name_found
-        and not is_structured_spreadsheet_query
-        and not is_file_list_query
-        and not is_count_temporal_query
-        and source_hint is None
-        and not explicit_filename_found
-        and not has_anaphora
-    ):
-        has_user_source_reference = True
+    # IMPORTANT: Do not treat arbitrary content words as source references.
+    # A query such as "Where did I mention joins?" or "Where did I mention Kafka?"
+    # is a content search, not a request for a file named "joins" or "kafka".
+    # Source resolution is allowed only when the user supplied an explicit filename
+    # or used a structural source-reference pattern (for example, "mummy image",
+    # "image about mummy", or "SQL notes").
 
     if is_structured_spreadsheet_query:
         has_user_source_reference = False
@@ -1085,6 +1099,15 @@ def analyze_query(question, indexed_files=None):
     # ------------------------------------------------------------
     # 6. Deterministic + semantic source resolution
     # ------------------------------------------------------------
+    #
+    # CRITICAL:
+    # Never run source resolution for a generic query.
+    #
+    # "summarize the call"
+    # "what was discussed in the recording"
+    # "summarize the image"
+    #
+    # must NOT select an arbitrary indexed file.
 
     if (
         has_source_reference
@@ -1125,8 +1148,8 @@ def analyze_query(question, indexed_files=None):
                 # Strong unique semantic match
                 if (
                     top_src
-                    and top_score >= 0.50
-                    and (top_score - second_score) >= 0.08
+                    and top_score >= 0.55
+                    and (top_score - second_score) >= 0.12
                 ):
                     source_hint = top_src
                     source_confidence = top_score
@@ -1136,7 +1159,7 @@ def analyze_query(question, indexed_files=None):
                     top_src
                     and top_score >= 0.45
                     and len(candidate_list) > 1
-                    and (top_score - second_score) < 0.08
+                    and (top_score - second_score) < 0.12
                 ):
                     is_ambiguous_source = True
                     ambiguous_candidate_sources = candidate_list
@@ -1146,7 +1169,6 @@ def analyze_query(question, indexed_files=None):
                 "Source resolution failed: %s",
                 exc
             )
-
 
 
     # ------------------------------------------------------------
@@ -1390,10 +1412,11 @@ def analyze_query(question, indexed_files=None):
     # Correction > Metadata/Temporal > Image Display > Image Metadata > Speaker >
     # Full Content / Translation > OCR > Image Summary > Audio Summary > Document Summary > Text Search
     source_type_patterns = [
-        r"^\s*what\s+(?:file\s+)?type\s+is\s+(?:the\s+)?(.+?)\s*[?.!]*\s*$",
-        r"^\s*what\s+kind\s+of\s+file\s+is\s+(?:the\s+)?(.+?)\s*[?.!]*\s*$",
-        r"^\s*what\s+format\s+is\s+(?:the\s+)?(.+?)\s*[?.!]*\s*$",
-        r"^\s*is\s+(.+?)\s+(an?|the)\s+(image|audio|video|pdf|document|spreadsheet|file)\s*[?.!]*\s*$",
+        r"^\s*what\s+is\s+(.+?)\s*[?.!]*\s*$",
+        r"^\s*what\s+type\s+is\s+(.+?)\s*[?.!]*\s*$",
+        r"^\s*what\s+kind\s+of\s+file\s+is\s+(.+?)\s*[?.!]*\s*$",
+        r"^\s*what\s+kind\s+of\s+file\s+is\s+the\s+(.+?)\s*[?.!]*\s*$",
+        r"^\s*is\s+(.+?)\s+(an?|the)\s+(image|audio|video|pdf|document|file)\s*[?.!]*\s*$",
     ]
 
     is_source_type_query = (
@@ -1402,17 +1425,35 @@ def analyze_query(question, indexed_files=None):
             re.match(pattern, question_lower, re.IGNORECASE)
             for pattern in source_type_patterns
         )
+        and not (
+            modality == "image"
+            and canonical_source_id is not None
+            and re.match(
+                r"^\s*what\s+is\s+.+?\s*[?.!]*\s*$",
+                question_lower,
+                re.IGNORECASE
+            )
+        )
     )
+
+
+
 
     if is_correction:
         intent = INTENT_CORRECTION
-    elif is_structured_spreadsheet_query:
-        intent = INTENT_SPREADSHEET_QUERY
+    # Metadata/file-inventory queries must win over spreadsheet semantics.
+    # "List all spreadsheets" is a file-list operation, not a workbook-row query.
     elif is_generic_file_count_query:
         intent = INTENT_FILE_COUNT
+    elif is_file_list_query and temporal_intent == "none":
+        intent = INTENT_FILE_LIST
     elif temporal_intent != "none":
         intent = INTENT_TEMPORAL_FILE_QUERY
+    elif is_structured_spreadsheet_query:
+        intent = INTENT_SPREADSHEET_QUERY
     elif is_image_display_query:
+        # User wants to see/retrieve an image, not analyse it.
+        # Placed before image_filename and image_summary to avoid misclassification.
         intent = "IMAGE_DISPLAY"
     elif is_image_filename_query:
         intent = INTENT_IMAGE_FILENAME_QUERY
@@ -1437,15 +1478,17 @@ def analyze_query(question, indexed_files=None):
         and not is_generic_file_count_query
         and not is_chunk_metadata_query
     ):
+        # Only route a resolved image-specific natural-language question
+        # to visual QA when no more specific image handler matched.
         intent = INTENT_IMAGE_VISUAL_QUERY
-    elif any(word in question_lower for word in ["summarize", "summarise", "summary", "overview", "synopsis", "outline", "main points", "key takeaways", "covered in", "walk me through"]):
+    
+    elif any(word in question_lower for word in ["summarize", "summarise", "summary", "overview"]):
         if modality == "image":
             intent = INTENT_IMAGE_SUMMARY
         else:
             intent = INTENT_DOCUMENT_SUMMARY
     else:
         intent = INTENT_TEXT_SEARCH
-
 
     visual_qa_keywords = [
         "what is in", "what's in", "content of", "describe", "what color", "how many",
@@ -1512,9 +1555,8 @@ def analyze_query(question, indexed_files=None):
         elif is_face_search_query(question):
             face_intent = FaceIntent.SEARCH
 
-    if face_intent != FaceIntent.NONE and not is_image_display_query:
+    if face_intent != FaceIntent.NONE:
         intent = INTENT_IMAGE_FACE_QUERY
-
 
     analysis_result = {
         "intent": intent,
@@ -1545,10 +1587,8 @@ def analyze_query(question, indexed_files=None):
         "document": Modality.DOCUMENT,
         "pdf": Modality.PDF,
         "docx": Modality.DOCX,
-        "spreadsheet": Modality.SPREADSHEET,
         "all": Modality.ALL
     }
-
     target_modality_enum = modality_enum_map.get(modality, Modality.ALL)
 
     intent_enum_map = {
@@ -1624,17 +1664,12 @@ def analyze_query(question, indexed_files=None):
     # Check if the resolved source actually exists in the database index or filesystem
     indexed_lower_files = [f.lower() for f in indexed_files] if indexed_files else []
     resolved_file_exists = False
-    if source_hint and not str(source_hint).startswith("UNRESOLVED_"):
-        base_name = os.path.basename(str(source_hint)).lower()
-        if (
-            base_name in indexed_lower_files
-            or (canonical_source_id and os.path.exists(canonical_source_id))
-            or (canonical_source_id and os.path.basename(canonical_source_id).lower() in indexed_lower_files)
-        ):
+    if canonical_source_id and not str(canonical_source_id).startswith("UNRESOLVED_"):
+        base_name = os.path.basename(canonical_source_id).lower()
+        if base_name in indexed_lower_files or os.path.exists(canonical_source_id):
             resolved_file_exists = True
 
     source_is_resolved = resolved_file_exists and not unresolved_explicit_source
-
 
     query_operation = infer_query_operation(
         question=question,
