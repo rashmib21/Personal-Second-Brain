@@ -181,13 +181,19 @@ class IntentRouter:
             )
 
         # Step 1: Incomplete / Ambiguous Source Clarification Guard
-        # If the request requires a source (e.g. summarization, full transcript, visual QA)
-        # but the query is incomplete or ambiguous, ask the user to clarify.
-        # Do NOT select an arbitrary file, most recent file, or fall back to global vector search!
+        # If the request requires a single source file (e.g. full file summarization, full transcript fetch, visual QA)
+        # but the query lacks source context and is NOT a topic search, ask the user to clarify.
+        # Topic queries (e.g. "summarize what I wrote about data engineering") must proceed to broad retrieval.
+        has_topic_context = any(
+            phrase in question.lower()
+            for phrase in ["about ", "regarding ", "on ", "what i ", "where i ", "my notes "]
+        ) or analysis.get("request_scope") == "partial_topic"
+
         if plan.source_spec.is_ambiguous or (
             plan.intent in [QueryIntent.SUMMARIZATION, QueryIntent.FULL_CONTENT_FETCH, QueryIntent.VISUAL_QA]
             and not plan.source_spec.is_resolved
             and not plan.source_spec.is_explicit
+            and not has_topic_context
         ):
             if plan.source_spec.candidate_sources and len(plan.source_spec.candidate_sources) > 1:
                 cand_str = " and ".join(plan.source_spec.candidate_sources[:2])

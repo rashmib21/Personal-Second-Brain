@@ -48,8 +48,10 @@ GENERIC_MEDIA_TERMS = {
     "list", "name", "names", "page", "pages",
     "content", "contents", "summary", "summaries",
     "note", "notes", "doc", "docs", "paper", "papers",
-    "sheet", "sheets", "text", "texts", "log", "logs"
-
+    "sheet", "sheets", "text", "texts", "log", "logs",
+    "data", "engineering", "company", "companies", "revenue",
+    "diagram", "diagrams", "chart", "charts", "architecture",
+    "written", "report", "project", "analysis", "system", "code"
 }
 
 STOP_WORDS_SET = {
@@ -263,24 +265,33 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
             best_token_score = 0.0
             exact_match_count = 0
 
+            generic_topic_words = GENERIC_MEDIA_TERMS
+
             for q_token in question_entity_tokens:
+                if q_token in generic_topic_words:
+                    continue
+
                 for s_token in stem_tokens:
+                    if s_token in generic_topic_words:
+                        continue
+
                     if q_token == s_token:
                         exact_match_count += 1
                         best_token_score = max(best_token_score, 1.0)
                         break
-                    
-                    # Fuzzy match check for typos (e.g. jethlal vs jethalal)
-                    similarity = calculate_token_similarity(q_token, s_token)
-                    if len(q_token) >= 4 and len(s_token) >= 4:
-                        if similarity >= 0.70:
-                            best_token_score = max(best_token_score, similarity)
-                    elif len(q_token) >= 3 and len(s_token) >= 3 and (q_token in s_token or s_token in q_token):
-                        if q_token not in GENERIC_MEDIA_TERMS and s_token not in GENERIC_MEDIA_TERMS:
-                            best_token_score = max(best_token_score, 0.85)
 
-            if best_token_score >= 0.70:
-                scored_candidates.append((best_token_score, exact_match_count, candidate))
+                    # Fuzzy match check for genuine typos in longer names (e.g. jethlal vs jethalal)
+                    similarity = calculate_token_similarity(q_token, s_token)
+                    if len(q_token) >= 5 and len(s_token) >= 5:
+                        if similarity >= 0.82:
+                            best_token_score = max(best_token_score, similarity)
+
+            # A single matched token only resolves if it matches a high fraction of the stem or is exact
+            if exact_match_count > 0:
+                score = 0.90 if exact_match_count >= 2 else (0.85 if len(stem_tokens) <= 2 else 0.50)
+                scored_candidates.append((score, exact_match_count, candidate))
+            elif best_token_score >= 0.82:
+                scored_candidates.append((best_token_score, 0, candidate))
 
         if scored_candidates:
             scored_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -1200,6 +1211,7 @@ def analyze_query(question, indexed_files=None):
         has_user_source_reference
         and source_hint is None
         and not is_ambiguous_source
+        and explicit_filename_found
     ):
         if meaningful_source_tokens:
 

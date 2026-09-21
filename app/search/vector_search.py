@@ -252,32 +252,147 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 				)
 
 	elif query_modality != "all":
-		if query_modality == "audio":
-			audio_exts = [".m4a", ".mp3", ".wav", ".mpeg", ".aac", ".flac"]
+		# Explicit modality routing.
+		# Only currently supported application modalities enter retrieval.
+		if query_modality == "image":
+			img_exts = [".jpg", ".jpeg", ".png", ".webp"]
+
 			for row in clean_rows:
 				p_low = row["path"].lower()
 				ftype = row["file_type"].lower()
-				if ftype == "audio" or any(p_low.endswith(ext) for ext in audio_exts):
+
+				if (
+					ftype == "image"
+					or any(p_low.endswith(ext) for ext in img_exts)
+				):
 					candidate_rows.append(row)
 
-		elif query_modality == "image":
-			img_exts = [".jpg", ".jpeg", ".png", ".webp"]
+		elif query_modality in {
+			"pdf",
+			"document",
+			"docx",
+			"spreadsheet",
+			"text",
+			"presentation",
+		}:
+			supported_document_exts = {
+				".pdf",
+				".doc",
+				".docx",
+				".xls",
+				".xlsx",
+				".csv",
+				".ods",
+				".txt",
+				".ppt",
+				".pptx",
+			}
+
+			supported_document_types = {
+				"pdf",
+				"document",
+				"docx",
+				"spreadsheet",
+				"text",
+				"presentation",
+			}
+
 			for row in clean_rows:
 				p_low = row["path"].lower()
 				ftype = row["file_type"].lower()
-				if ftype == "image" or any(p_low.endswith(ext) for ext in img_exts):
+
+				if (
+					ftype in supported_document_types
+					or any(p_low.endswith(ext) for ext in supported_document_exts)
+				):
 					candidate_rows.append(row)
+
 		else:
-			candidate_rows = clean_rows
+			# Unknown or unsupported modality.
+			# Never silently search the entire database.
+			candidate_rows = []
+
 	else:
-		candidate_rows = clean_rows
+		# "all" means all CURRENTLY SUPPORTED searchable content.
+		# Historical audio/video records in LanceDB are excluded.
+		supported_exts = {
+			".pdf",
+			".doc",
+			".docx",
+			".xls",
+			".xlsx",
+			".csv",
+			".ods",
+			".txt",
+			".ppt",
+			".pptx",
+			".jpg",
+			".jpeg",
+			".png",
+			".webp",
+		}
+
+		supported_types = {
+			"pdf",
+			"document",
+			"docx",
+			"spreadsheet",
+			"text",
+			"presentation",
+			"image",
+		}
+
+		for row in clean_rows:
+			p_low = row["path"].lower()
+			ftype = row["file_type"].lower()
+
+			if (
+				ftype in supported_types
+				or any(p_low.endswith(ext) for ext in supported_exts)
+			):
+				candidate_rows.append(row)
 
 	if len(candidate_rows) == 0:
 		return []
 
 
-	# Step 4: Dense Vector Embedding Search across candidate_rows
+	# Step 4: Dense Vector Embedding Search
+	# Search only candidates from the compatible text embedding table.
+	# Image CLIP embeddings must NOT be compared with text embeddings.
+
 	question_vector = generate_embedding("text", question)
+
+	dense_rank = {}
+
+	if candidate_rows and query_modality != "image" and doc_table is not None:
+	    candidate_ids = {
+	        str(row["chunk_id"])
+	        for row in candidate_rows
+	    }
+
+	    dense_results = (
+	        doc_table
+	        .search(question_vector)
+	        .metric("cosine")
+	        .limit(min(300, doc_table.count_rows()))
+	        .to_list()
+	    )
+
+	    rank_number = 1
+
+	    for doc in dense_results:
+	        doc_id = str(doc.get("chunk_id", ""))
+
+	        if doc_id in candidate_ids:
+	            dense_rank[doc_id] = rank_number
+	            rank_number += 1
+
+	    # Candidates missed by dense retrieval get a deterministic fallback rank.
+	    for row in candidate_rows:
+	        chunk_id = str(row["chunk_id"])
+
+	        if chunk_id not in dense_rank:
+	            dense_rank[chunk_id] = len(dense_rank) + 1
 
 	# Step 5: Lexical (BM25) search ranking across candidate_rows
 	all_words_list = []
@@ -305,17 +420,7 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 		lexical_rank[chunk_id] = rank_number
 		rank_number += 1
 
-	# Dense ranking
-	dense_results = doc_table.search(question_vector).metric("cosine").limit(300).to_list() if doc_table else []
-	cand_ids = set(r["chunk_id"] for r in candidate_rows)
-
-	dense_rank = {}
-	rank_number = 1
-	for doc in dense_results:
-		if doc["chunk_id"] in cand_ids:
-			dense_rank[doc["chunk_id"]] = rank_number
-			rank_number += 1
-
+	
 	for r in candidate_rows:
 		if r["chunk_id"] not in dense_rank:
 			dense_rank[r["chunk_id"]] = len(dense_rank) + 1
@@ -324,7 +429,7 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 
 	# Step 6: Reciprocal Rank Fusion (RRF)
 	k = 60
-	all_candidate_chunk_ids = list(cand_ids)
+	all_candidate_chunk_ids = list(chunk_data_by_id.keys())
 
 	combined_score = []
 	for chunk_id in all_candidate_chunk_ids:
@@ -362,7 +467,7 @@ def search(question, max_results=10, analysis=None, preferred_sources=None, reje
 			if len(final_chunks) >= max_results:
 				break
 
-	if not final_chunks and candidate_rows and preferred_set:
+	if not final_chunks and candidate_rows:
 		final_chunks = candidate_rows[:max_results]
 
 	return final_chunks
@@ -440,144 +545,188 @@ def search_images_by_text(question, max_results=5):
 	return results		
 
 
-def get_full_transcript_for_source(source_path):
-	"""
-	Retrieves ALL transcript/document chunks for a source file from LanceDB documents table in original sequence order.
-	Validates completeness (expected_chunks, fetched_chunks, missing_chunks, duplicate_chunks, reconstructed_chunks) and sorts by chunk sequence index.
-	Strips chunk header prefixes, removes structural chunk boundary overlap duplication while preserving raw evidence 100% intact.
-	Returns tuple: (reconstructed_transcript_text, chunk_count, validation_metrics_dict)
-	"""
-	doc_table = get_table()
-	if doc_table is None or doc_table.count_rows() == 0:
-		empty_metrics = {
-			"expected_chunks": 0, "fetched_chunks": 0, "missing_chunks": 0,
-			"duplicate_chunks": 0, "reconstructed_chunks": 0, "is_complete": False
-		}
-		return "", 0, empty_metrics
+def get_full_content_for_source(source_path):
+    """
+    Retrieve all stored chunks for one source in deterministic sequence order.
 
-	df_doc = doc_table.to_pandas()
-	if df_doc.empty:
-		empty_metrics = {
-			"expected_chunks": 0, "fetched_chunks": 0, "missing_chunks": 0,
-			"duplicate_chunks": 0, "reconstructed_chunks": 0, "is_complete": False
-		}
-		return "", 0, empty_metrics
+    The function:
+    - matches only the requested source
+    - detects explicit chunk-number gaps
+    - detects duplicate chunk IDs
+    - preserves chunk content
+    - removes only structural boundary overlap
+    - reports completeness honestly
+    """
+    doc_table = get_table()
 
-	target_base = os.path.basename(source_path).lower()
-	matching_rows = []
+    empty_metrics = {
+        "expected_chunks": 0,
+        "fetched_chunks": 0,
+        "missing_chunks": 0,
+        "duplicate_chunks": 0,
+        "reconstructed_chunks": 0,
+        "is_complete": False,
+        "ordering_guarantee": "none",
+        "missing_chunk_indices": []
+    }
 
-	for i in range(len(df_doc)):
-		row = df_doc.iloc[i]
-		r_path = str(row.get("path", ""))
-		r_base = os.path.basename(r_path).lower()
-		if r_base == target_base or source_path.lower() in r_path.lower():
-			matching_rows.append(row)
+    if not source_path or doc_table is None or doc_table.count_rows() == 0:
+        return "", 0, empty_metrics
 
-	if not matching_rows:
-		empty_metrics = {
-			"expected_chunks": 0, "fetched_chunks": 0, "missing_chunks": 0,
-			"duplicate_chunks": 0, "reconstructed_chunks": 0, "is_complete": False
-		}
-		return "", 0, empty_metrics
+    df_doc = doc_table.to_pandas()
 
-	expected_chunks = len(matching_rows)
-	fetched_chunks = len(matching_rows)
+    if df_doc.empty:
+        return "", 0, empty_metrics
 
-	# Check for explicit chunk sequence index pattern (_chunk_N)
-	has_explicit_chunk_indices = False
-	chunk_ids_seen = set()
-	duplicate_chunks = 0
+    target_base = os.path.basename(source_path).lower()
+    source_path_lower = str(source_path).lower()
 
-	for row in matching_rows:
-		c_id = str(row.get("chunk_id", ""))
-		if c_id in chunk_ids_seen:
-			duplicate_chunks += 1
-		else:
-			chunk_ids_seen.add(c_id)
+    matching_rows = []
 
-		if "_chunk_" in c_id:
-			has_explicit_chunk_indices = True
+    for i in range(len(df_doc)):
+        row = df_doc.iloc[i]
 
-	if has_explicit_chunk_indices:
-		def extract_chunk_sequence_index(row_item):
-			c_id = str(row_item.get("chunk_id", ""))
-			match = re.search(r"_chunk_(\d+)", c_id)
-			if match:
-				return int(match.group(1))
-			return 0
+        r_path = str(row.get("path", ""))
+        r_path_lower = r_path.lower()
+        r_base = os.path.basename(r_path).lower()
 
-		matching_rows.sort(key=extract_chunk_sequence_index)
-		ordering_guarantee = "explicit_sequence_index"
-	else:
-		ordering_guarantee = "unindexed_legacy_sequence_limitation"
-		if DEBUG:
-			print(f"WARNING: File '{os.path.basename(source_path)}' lacks explicit sequence indices (_chunk_N). Chronological ordering cannot be guaranteed by database iteration order.")
+        if (
+            r_base == target_base
+            or r_path_lower == source_path_lower
+        ):
+            matching_rows.append(row.to_dict())
 
-	cleaned_chunks = []
-	for row in matching_rows:
-		text = str(row.get("text", ""))
-		if text.startswith("File:"):
-			parts = text.split("\n", 1)
-			if len(parts) > 1:
-				text = parts[1]
-		cleaned_chunks.append(text.strip())
+    if not matching_rows:
+        return "", 0, empty_metrics
 
-	reconstructed_chunks_count = len(cleaned_chunks)
-	missing_chunks = max(0, expected_chunks - fetched_chunks)
-	is_complete = (missing_chunks == 0 and fetched_chunks == expected_chunks and fetched_chunks > 0)
+    indexed_rows = []
+    unindexed_rows = []
 
-	validation_metrics = {
-		"expected_chunks": expected_chunks,
-		"fetched_chunks": fetched_chunks,
-		"missing_chunks": missing_chunks,
-		"duplicate_chunks": duplicate_chunks,
-		"reconstructed_chunks": reconstructed_chunks_count,
-		"ordering_guarantee": ordering_guarantee,
-		"is_complete": is_complete
-	}
+    for row in matching_rows:
+        chunk_id = str(row.get("chunk_id", ""))
 
-	if DEBUG:
-		print("\n===== FULL TRANSCRIPT RETRIEVAL METRICS =====")
-		print(f"Source: {os.path.basename(source_path)}")
-		print(f"expected_chunk_count: {expected_chunks}")
-		print(f"retrieved_chunk_count: {fetched_chunks}")
-		print(f"missing_chunks: {missing_chunks}")
-		print(f"duplicate_chunks: {duplicate_chunks}")
-		print(f"reconstructed_chunk_count: {reconstructed_chunks_count}")
-		print(f"is_complete: {is_complete}")
+        match = re.search(r"_chunk_(\d+)", chunk_id)
 
-	# Deduplicate structural chunk boundary overlap (trailing words of Chunk N matching leading words of Chunk N+1)
-	reconstructed_parts = []
-	for chunk_text in cleaned_chunks:
-		if not chunk_text:
-			continue
+        if match:
+            indexed_rows.append((int(match.group(1)), row))
+        else:
+            unindexed_rows.append(row)
 
-		if not reconstructed_parts:
-			reconstructed_parts.append(chunk_text)
-			continue
+    duplicate_chunks = 0
 
-		prev_chunk = reconstructed_parts[-1]
-		prev_words = prev_chunk.split()
-		curr_words = chunk_text.split()
+    if indexed_rows:
+        indexed_rows.sort(key=lambda item: item[0])
 
-		# Look for structural word overlap at boundary (up to 15 words)
-		overlap_len = 0
-		max_check = min(15, len(prev_words), len(curr_words))
+        observed_indices = [index for index, _ in indexed_rows]
 
-		for n in range(max_check, 0, -1):
-			if prev_words[-n:] == curr_words[:n]:
-				overlap_len = n
-				break
+        duplicate_indices = {
+            index
+            for index in observed_indices
+            if observed_indices.count(index) > 1
+        }
 
-		if overlap_len > 0:
-			trimmed_curr = " ".join(curr_words[overlap_len:])
-			if trimmed_curr:
-				reconstructed_parts.append(trimmed_curr)
-		else:
-			reconstructed_parts.append(chunk_text)
+        duplicate_chunks = sum(
+            observed_indices.count(index) - 1
+            for index in duplicate_indices
+        )
 
-	raw_reconstructed_transcript = "\n".join(reconstructed_parts)
-	return raw_reconstructed_transcript, expected_chunks, validation_metrics
+        min_index = min(observed_indices)
+        max_index = max(observed_indices)
+
+        expected_indices = set(range(min_index, max_index + 1))
+        observed_index_set = set(observed_indices)
+
+        missing_chunk_indices = sorted(
+            expected_indices - observed_index_set
+        )
+
+        ordered_rows = [row for _, row in indexed_rows]
+
+        if unindexed_rows:
+            ordered_rows.extend(unindexed_rows)
+            ordering_guarantee = "mixed_indexed_and_unindexed"
+        else:
+            ordering_guarantee = "explicit_sequence_index"
+
+        expected_chunks = (
+            len(observed_indices) + len(missing_chunk_indices)
+        )
+
+    else:
+        ordered_rows = matching_rows
+        expected_chunks = len(matching_rows)
+        missing_chunk_indices = []
+        ordering_guarantee = "unindexed_legacy_sequence_limitation"
+
+    fetched_chunks = len(ordered_rows)
+
+    reconstructed_parts = []
+
+    for row in ordered_rows:
+        chunk_text = str(row.get("text", "") or "").strip()
+
+        if not chunk_text:
+            continue
+
+        if not reconstructed_parts:
+            reconstructed_parts.append(chunk_text)
+            continue
+
+        previous_text = reconstructed_parts[-1]
+
+        previous_words = previous_text.split()
+        current_words = chunk_text.split()
+
+        overlap_len = 0
+
+        max_check = min(
+            15,
+            len(previous_words),
+            len(current_words)
+        )
+
+        for n in range(max_check, 0, -1):
+            if previous_words[-n:] == current_words[:n]:
+                overlap_len = n
+                break
+
+        if overlap_len > 0:
+            trimmed_current = " ".join(
+                current_words[overlap_len:]
+            )
+
+            if trimmed_current:
+                reconstructed_parts.append(trimmed_current)
+        else:
+            reconstructed_parts.append(chunk_text)
+
+    reconstructed_text = "\n".join(reconstructed_parts)
+
+    reconstructed_chunks = len(reconstructed_parts)
+
+    missing_chunks = len(missing_chunk_indices)
+
+    validation_metrics = {
+        "expected_chunks": expected_chunks,
+        "fetched_chunks": fetched_chunks,
+        "missing_chunks": missing_chunks,
+        "duplicate_chunks": duplicate_chunks,
+        "reconstructed_chunks": reconstructed_chunks,
+        "is_complete": (
+            missing_chunks == 0
+            and duplicate_chunks == 0
+            and fetched_chunks > 0
+            and reconstructed_chunks > 0
+        ),
+        "ordering_guarantee": ordering_guarantee,
+        "missing_chunk_indices": missing_chunk_indices
+    }
+
+    return (
+        reconstructed_text,
+        expected_chunks,
+        validation_metrics
+    )
 
 
 def get_stored_ocr_text_for_image(source_path):
@@ -651,5 +800,5 @@ def get_stored_ocr_text_for_image(source_path):
 	return full_ocr, len(matching_rows)
 
 
-
-		
+# Backward compatibility alias for full content retrieval
+get_full_transcript_for_source = get_full_content_for_source
