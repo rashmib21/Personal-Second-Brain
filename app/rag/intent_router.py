@@ -1341,18 +1341,22 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
                     and correct_source not in preferred_sources
                 ):
                     # Feedback may influence ranking only when it is
-                    # compatible with the already-resolved source.
+                    # compatible with an explicitly resolved source_hint.
+                    # Never force a single preferred source on open global queries when source_hint is None.
                     if (
-                        not source_hint
-                        or correct_source.lower() == source_hint.lower()
-                        or os.path.basename(correct_source).lower()
-                        == os.path.basename(source_hint).lower()
+                        source_hint
+                        and (
+                            correct_source.lower() == source_hint.lower()
+                            or os.path.basename(correct_source).lower()
+                            == os.path.basename(source_hint).lower()
+                        )
                     ):
                         preferred_sources.append(correct_source)
 
                 if (
                     wrong_source
                     and wrong_source not in rejected_sources
+                    and source_hint
                 ):
                     rejected_sources.append(wrong_source)
 
