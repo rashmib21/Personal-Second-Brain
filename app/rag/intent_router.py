@@ -512,47 +512,7 @@ class IntentRouter:
             return msg, [source_name], 0
 
         # ---------------------------------------------------------
-        # 5. Validate requested spreadsheet fields before filtering
-        # ---------------------------------------------------------
-        # Never execute a numeric query against a semantically
-        # different column. For example, "salary" must not silently
-        # become "CTC (LPA)".
-        from app.rag.spreadsheet_query import _validate_requested_numeric_field
-
-        numeric_field = _validate_requested_numeric_field(
-            rows,
-            question
-        )
-
-        if numeric_field and numeric_field["column"] is None:
-            requested_field = numeric_field["field"]
-
-            msg = (
-                f"The spreadsheet '{os.path.basename(canonical_path)}' "
-                f"does not contain a '{requested_field}' column, so I "
-                f"cannot answer this query reliably from this file."
-            )
-
-            update_last_interaction(
-                question,
-                msg,
-                [os.path.basename(canonical_path)],
-                plan.modality.value
-            )
-
-            if return_structured:
-                return {
-                    "answer": msg,
-                    "sources": [os.path.basename(canonical_path)],
-                    "num_chunks": 0,
-                    "type": "text",
-                    "images": []
-                }
-
-            return msg, [os.path.basename(canonical_path)], 0
-
-        # ---------------------------------------------------------
-        # 6. Deterministic filtering
+        # 5. Deterministic filtering
         # ---------------------------------------------------------
         filtered_rows = filter_rows(
             rows,
@@ -597,16 +557,24 @@ class IntentRouter:
 
         else:
             # -----------------------------------------------------
-            # 7. Deterministic sorting
+            # 7. Deterministic sorting + requested ranking limit
             # -----------------------------------------------------
             filtered_rows = sort_rows(
                 filtered_rows,
                 question
             )
 
-            answer = format_rows(
-                filtered_rows
+            from app.rag.spreadsheet_query import (
+                requested_result_limit,
+                format_ranking_result,
             )
+            result_limit = requested_result_limit(question)
+
+            if result_limit is not None:
+                ranked_rows = filtered_rows[:result_limit]
+                answer = format_ranking_result(ranked_rows, question)
+            else:
+                answer = format_rows(filtered_rows)
 
         # ---------------------------------------------------------
         # 8. Count queries
@@ -1563,9 +1531,13 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
 
         # QueryAnalyzer has already resolved the requested file type.
         # This handler only executes the COUNT operation.
+        # file_type=None or file_type="all" both mean count every file,
+        # routed to the else branch below.
         requested_type = getattr(plan, "file_type", None)
+        if requested_type == "all":
+            requested_type = None
 
-        if requested_type:
+        if requested_type and requested_type in extension_groups:
             extensions = extension_groups[requested_type]
 
             count = 0
@@ -1604,4 +1576,4 @@ Provide a clear, accurate, and structured summary strictly grounded in the conte
                 "sources": [],
             }
 
-        return answer, [], 0    
+        return answer, [], count

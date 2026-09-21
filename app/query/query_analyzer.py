@@ -555,6 +555,7 @@ def infer_query_operation(
 
     if intent in {
         INTENT_FILE_LIST,
+        INTENT_TEMPORAL_FILE_QUERY,
         INTENT_SOURCE_LOOKUP,
     }:
         return QueryOperation.LIST
@@ -660,15 +661,12 @@ def analyze_query(question, indexed_files=None):
     start_dt, end_dt, date_label = parse_date_expression(question_lower)
 
     file_list_patterns = [
-        r"\blist\s+(?:all\s+)?pdfs?\b",
-        r"\bshow\s+(?:all\s+)?pdfs?\b",
-        r"\blist\s+(?:all\s+)?spreadsheets?\b",
-        r"\bshow\s+(?:all\s+)?spreadsheets?\b",
-        r"\blist\s+(?:all\s+)?workbooks?\b",
-        r"\bshow\s+(?:all\s+)?workbooks?\b",
         r"\blist\s+(?:all\s+)?files?\b", r"\bshow\s+(?:all\s+)?files?\b", r"\blist\s+(?:all\s+)?images?\b", r"\bshow\s+(?:all\s+)?images?\b",
         r"\blist\s+(?:all\s+)?photos?\b", r"\bshow\s+(?:all\s+)?photos?\b", r"\blist\s+(?:all\s+)?pictures?\b", r"\bshow\s+(?:all\s+)?pictures?\b",
         r"\blist\s+(?:all\s+)?audio\b", r"\bshow\s+(?:all\s+)?audio\b", r"\blist\s+(?:all\s+)?documents?\b", r"\bshow\s+(?:all\s+)?documents?\b",
+        r"\blist\s+(?:all\s+)?pdfs?\b", r"\bshow\s+(?:all\s+)?pdfs?\b",
+        r"\blist\s+(?:all\s+)?(?:spreadsheets?|workbooks?|excel(?:\s+files?)?|xlsx|xls|csv)\b",
+        r"\bshow\s+(?:all\s+)?(?:spreadsheets?|workbooks?|excel(?:\s+files?)?|xlsx|xls|csv)\b",
         r"\bwhich\s+files\b", r"\bwhich\s+audio\b", r"\bwhich\s+images?\b", r"\bwhich\s+photos?\b", r"\bwhich\b.*\b(?:files?|images?|photos?|pictures?|audio|recordings?|documents?)\b",
         r"\bfiles?\s+uploaded\b", r"\bfiles?\s+added\b", r"\bimages?\s+added\b", r"\bphotos?\s+added\b", r"\baudio\s+added\b", r"\brecordings?\s+added\b",
         r"\brecent\s+files?\b", r"\blatest\s+files?\b", r"\bnewest\s+files?\b", r"\bmost\s+recent\b", r"\blast\s+files?\b",
@@ -720,10 +718,7 @@ def analyze_query(question, indexed_files=None):
     temporal_intent = "none"
     if is_count_temporal_query:
         temporal_intent = INTENT_FILE_COUNT
-    elif start_dt is not None or any(
-        word in question_lower
-        for word in ["recent", "latest", "newest", "last"]
-    ):
+    elif is_file_list_query:
         temporal_intent = INTENT_TEMPORAL_FILE_QUERY
 
     # Step 3: Modality & File Type Categorization
@@ -741,18 +736,22 @@ def analyze_query(question, indexed_files=None):
 
     pdf_keywords = ["pdf", "pdfs"]
 
+    spreadsheet_keywords = [
+        "excel", "spreadsheet", "spreadsheets", "workbook", "workbooks",
+        "xlsx", "xls", "csv", "ods", "sheet", "sheets"
+    ]
+
     doc_keywords = [
-        "docx", "doc",
-        "document", "documents",
-        "paper", "papers",
-        "notes", "note",
-        "sheet", "sheets"
+        "docx", "doc", "document", "documents",
+        "paper", "papers", "notes", "note"
     ]
 
     if any(kw in question_lower for kw in image_keywords):
         modality = "image"
     elif any(kw in question_lower for kw in pdf_keywords):
         modality = "pdf"
+    elif any(kw in question_lower for kw in spreadsheet_keywords):
+        modality = "spreadsheet"
     elif any(kw in question_lower for kw in doc_keywords):
         modality = "docx"
 
@@ -842,15 +841,21 @@ def analyze_query(question, indexed_files=None):
     # The second condition is important because users should not have
     # to say "Excel" in every query when the active source is an Excel
     # workbook.
+    # File-list queries such as "list all spreadsheets" ask about
+    # files on disk — they must NOT be treated as structured data
+    # queries inside a spreadsheet workbook.
     is_structured_spreadsheet_query = (
-        (
-            has_spreadsheet_context
-            and (has_spreadsheet_operation or has_spreadsheet_field)
-        )
-        or (
-            has_spreadsheet_operation
-            and has_spreadsheet_field
-            and modality in {"spreadsheet", "document", "all"}
+        not is_file_list_query
+        and (
+            (
+                has_spreadsheet_context
+                and (has_spreadsheet_operation or has_spreadsheet_field)
+            )
+            or (
+                has_spreadsheet_operation
+                and has_spreadsheet_field
+                and modality in {"spreadsheet", "document", "all"}
+            )
         )
     )
 
@@ -1079,12 +1084,28 @@ def analyze_query(question, indexed_files=None):
     # Structured spreadsheet queries are handled separately and must
     # never use entity tokens as source references.
 
-    # IMPORTANT: Do not treat arbitrary content words as source references.
-    # A query such as "Where did I mention joins?" or "Where did I mention Kafka?"
-    # is a content search, not a request for a file named "joins" or "kafka".
-    # Source resolution is allowed only when the user supplied an explicit filename
-    # or used a structural source-reference pattern (for example, "mummy image",
-    # "image about mummy", or "SQL notes").
+    if (
+        meaningful_source_name_found
+        and not is_structured_spreadsheet_query
+        and source_hint is None
+        and not explicit_filename_found
+        and not has_anaphora
+    ):
+        source_match, source_match_confidence = find_best_matching_source(
+            question_lower,
+            indexed_files,
+            query_modality=modality
+        )
+
+        if isinstance(source_match, list):
+            has_user_source_reference = True
+        elif (
+            source_match is not None
+            and source_match_confidence >= 0.70
+        ):
+            has_user_source_reference = True
+        else:
+            has_user_source_reference = False
 
     if is_structured_spreadsheet_query:
         has_user_source_reference = False
@@ -1441,16 +1462,22 @@ def analyze_query(question, indexed_files=None):
 
     if is_correction:
         intent = INTENT_CORRECTION
-    # Metadata/file-inventory queries must win over spreadsheet semantics.
-    # "List all spreadsheets" is a file-list operation, not a workbook-row query.
     elif is_generic_file_count_query:
+        # "How many spreadsheets/PDFs/images do I have?" — counts files on disk.
+        # Must win over is_structured_spreadsheet_query, which only handles
+        # data queries INSIDE a workbook.
         intent = INTENT_FILE_COUNT
-    elif is_file_list_query and temporal_intent == "none":
+    elif is_file_list_query and start_dt is None:
+        # Plain file-list query with NO temporal constraint.
+        # Examples: "list all files", "list all spreadsheets", "show all PDFs".
+        # These enumerate the authoritative file inventory without any date filter.
         intent = INTENT_FILE_LIST
-    elif temporal_intent != "none":
-        intent = INTENT_TEMPORAL_FILE_QUERY
     elif is_structured_spreadsheet_query:
         intent = INTENT_SPREADSHEET_QUERY
+    elif temporal_intent != "none":
+        # File-list OR count query that includes a date range filter.
+        # Examples: "files uploaded yesterday", "which files were added today".
+        intent = INTENT_TEMPORAL_FILE_QUERY
     elif is_image_display_query:
         # User wants to see/retrieve an image, not analyse it.
         # Placed before image_filename and image_summary to avoid misclassification.
@@ -1587,6 +1614,7 @@ def analyze_query(question, indexed_files=None):
         "document": Modality.DOCUMENT,
         "pdf": Modality.PDF,
         "docx": Modality.DOCX,
+        "spreadsheet": Modality.SPREADSHEET,
         "all": Modality.ALL
     }
     target_modality_enum = modality_enum_map.get(modality, Modality.ALL)
