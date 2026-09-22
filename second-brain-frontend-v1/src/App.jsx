@@ -83,10 +83,20 @@ export default function App() {
     return views.find((x) => x.id === view)?.label || "All Chats";
   }, [view, selectedSource]);
 
+  const [chatsByKey, setChatsByKey] = useState({});
+
+  const activeKey = useMemo(() => {
+    if (selectedSource) {
+      return `source:${selectedSource.path || selectedSource.name}`;
+    }
+    return `modality:${view}`;
+  }, [selectedSource, view]);
+
+  const messages = chatsByKey[activeKey] || [];
+
   function selectView(next) {
     setView(next);
     setSelectedSource(null);
-    setMessages([]);
   }
 
   function selectSource(item) {
@@ -95,7 +105,6 @@ export default function App() {
       path: itemPath(item),
       type: view
     });
-    setMessages([]);
   }
 
   async function sendMessage(event) {
@@ -103,22 +112,25 @@ export default function App() {
     const text = query.trim();
     if (!text || sending) return;
 
-    setMessages((current) => [...current, { role: "user", text }]);
+    const userMsg = { role: "user", text };
+    setChatsByKey((prev) => ({
+      ...prev,
+      [activeKey]: [...(prev[activeKey] || []), userMsg]
+    }));
+
     setQuery("");
     setSending(true);
 
     try {
-      // Determine active_file when a sidebar source is selected
       let activeFile = null;
       if (selectedSource) {
         activeFile = selectedSource.path || selectedSource.name || null;
       }
 
-      // Determine modality context (selected source type, or active view if document/spreadsheet/image)
       let modalityValue = null;
       if (selectedSource) {
         modalityValue = selectedSource.type || null;
-      } else if (view === "document" || view === "spreadsheet" || view === "image") {
+      } else if (view === "documents" || view === "spreadsheets" || view === "images") {
         modalityValue = view;
       }
 
@@ -133,19 +145,22 @@ export default function App() {
         response?.message ??
         (typeof response === "string" ? response : "The backend returned no answer.");
 
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          text: answer,
-          sources: response?.sources || response?.source || []
-        }
-      ]);
+      const assistantMsg = {
+        role: "assistant",
+        text: answer,
+        sources: response?.sources || response?.source || []
+      };
+
+      setChatsByKey((prev) => ({
+        ...prev,
+        [activeKey]: [...(prev[activeKey] || []), assistantMsg]
+      }));
     } catch (error) {
-      setMessages((current) => [
-        ...current,
-        { role: "error", text: error.message }
-      ]);
+      const errorMsg = { role: "error", text: error.message };
+      setChatsByKey((prev) => ({
+        ...prev,
+        [activeKey]: [...(prev[activeKey] || []), errorMsg]
+      }));
     } finally {
       setSending(false);
     }

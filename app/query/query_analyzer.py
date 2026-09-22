@@ -1114,6 +1114,61 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
     # Structured spreadsheet queries are handled separately and must
     # never use entity tokens as source references.
 
+    # ------------------------------------------------------------
+    # Source Resolution (PART A: Explicit Source First)
+    # ------------------------------------------------------------
+    # If the user explicitly mentions a filename or recognizable filename stem
+    # (e.g. "from IT_Direct_Hire_companies", "in linux.pdf"), resolve that source
+    # BEFORE deciding the final modality or intent handler.
+    if source_hint is None and meaningful_source_name_found:
+        src_match, src_conf = find_best_matching_source(
+            question_lower,
+            indexed_files,
+            query_modality="all"
+        )
+        if isinstance(src_match, list):
+            is_ambiguous_source = True
+            ambiguous_candidate_sources = src_match
+            source_confidence = src_conf
+            has_user_source_reference = True
+        elif src_match and src_conf >= 0.70:
+            source_hint = src_match
+            source_confidence = src_conf
+            has_user_source_reference = True
+
+    if source_hint is not None:
+        resolved_ext = os.path.splitext(source_hint)[1].lower()
+        if resolved_ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}:
+            modality = "image"
+        elif resolved_ext in {".xls", ".xlsx", ".csv", ".ods"}:
+            modality = "spreadsheet"
+        elif resolved_ext == ".pdf":
+            modality = "pdf"
+        elif resolved_ext in {".doc", ".docx", ".txt"}:
+            modality = "docx"
+
+    # Re-evaluate spreadsheet scope after resolving source
+    active_ext = os.path.splitext(active_file)[1].lower() if active_file else ""
+    hint_ext = os.path.splitext(source_hint)[1].lower() if source_hint else ""
+    is_spreadsheet_file = active_ext in {".xlsx", ".xls", ".csv", ".ods"} or hint_ext in {".xlsx", ".xls", ".csv", ".ods"}
+    is_spreadsheet_scope = (modality == "spreadsheet" or is_spreadsheet_file)
+
+    is_structured_spreadsheet_query = (
+        not is_file_list_query
+        and not is_count_temporal_query
+        and (
+            is_spreadsheet_scope
+            or (
+                has_spreadsheet_context
+                and (has_spreadsheet_operation or has_spreadsheet_field)
+            )
+            or (
+                has_spreadsheet_operation
+                and (has_spreadsheet_field or modality in {"spreadsheet", "all"})
+            )
+        )
+    )
+
     if (
         meaningful_source_name_found
         and not is_structured_spreadsheet_query
@@ -1136,9 +1191,6 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
             has_user_source_reference = True
         else:
             has_user_source_reference = False
-
-    if is_structured_spreadsheet_query:
-        has_user_source_reference = False
 
     has_source_reference = (
         has_user_source_reference
