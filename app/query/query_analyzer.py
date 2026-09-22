@@ -634,7 +634,7 @@ def infer_query_operation(
     return QueryOperation.ANSWER
 
 
-def analyze_query(question, indexed_files=None):
+def analyze_query(question, indexed_files=None, active_file=None, request_modality=None):
     """
     Analyzes the user query and produces structured classification output containing:
     - intent: explicit Intent Taxonomy constant
@@ -734,6 +734,19 @@ def analyze_query(question, indexed_files=None):
 
     # Step 3: Modality & File Type Categorization
     modality = "all"
+    if request_modality and request_modality.lower() != "all":
+        modality = request_modality.lower().strip()
+    elif active_file:
+        active_ext = os.path.splitext(active_file)[1].lower()
+        if active_ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}:
+            modality = "image"
+        elif active_ext in {".xls", ".xlsx", ".csv", ".ods"}:
+            modality = "spreadsheet"
+        elif active_ext in {".pdf"}:
+            modality = "pdf"
+        elif active_ext in {".doc", ".docx"}:
+            modality = "docx"
+
     image_keywords = [
         "image", "images",
         "picture", "pictures",
@@ -757,14 +770,15 @@ def analyze_query(question, indexed_files=None):
         "paper", "papers", "notes", "note"
     ]
 
-    if any(kw in question_lower for kw in image_keywords):
-        modality = "image"
-    elif any(kw in question_lower for kw in pdf_keywords):
-        modality = "pdf"
-    elif any(kw in question_lower for kw in spreadsheet_keywords):
-        modality = "spreadsheet"
-    elif any(kw in question_lower for kw in doc_keywords):
-        modality = "docx"
+    if modality == "all":
+        if any(kw in question_lower for kw in image_keywords):
+            modality = "image"
+        elif any(kw in question_lower for kw in pdf_keywords):
+            modality = "pdf"
+        elif any(kw in question_lower for kw in spreadsheet_keywords):
+            modality = "spreadsheet"
+        elif any(kw in question_lower for kw in doc_keywords):
+            modality = "docx"
 
     # ============================================================
     spreadsheet_context_patterns = [
@@ -855,17 +869,22 @@ def analyze_query(question, indexed_files=None):
     # File-list queries such as "list all spreadsheets" ask about
     # files on disk — they must NOT be treated as structured data
     # queries inside a spreadsheet workbook.
+    active_ext = os.path.splitext(active_file)[1].lower() if active_file else ""
+    is_spreadsheet_file = active_ext in {".xlsx", ".xls", ".csv", ".ods"}
+    is_spreadsheet_scope = (modality == "spreadsheet" or is_spreadsheet_file)
+
     is_structured_spreadsheet_query = (
         not is_file_list_query
+        and not is_count_temporal_query
         and (
-            (
+            is_spreadsheet_scope
+            or (
                 has_spreadsheet_context
                 and (has_spreadsheet_operation or has_spreadsheet_field)
             )
             or (
                 has_spreadsheet_operation
-                and has_spreadsheet_field
-                and modality in {"spreadsheet", "document", "all"}
+                and (has_spreadsheet_field or modality in {"spreadsheet", "all"})
             )
         )
     )
@@ -1344,7 +1363,8 @@ def analyze_query(question, indexed_files=None):
 
     ocr_phrases = [
         "text in the image", "text in image", "what is the text", "read text",
-        "ocr text", "words in the image", "writing in the image", "text of image",
+        "ocr text", "words in the image", "writing in the image", "written in",
+        "what is written", "text of image",
         "all the names in", "all names in", "all the text in", "all text in",
         "all the text in", "all text in", "text from", "content of", "content of dense image",
         "content of dense"
@@ -1445,7 +1465,6 @@ def analyze_query(question, indexed_files=None):
     # Correction > Metadata/Temporal > Image Display > Image Metadata > Speaker >
     # Full Content / Translation > OCR > Image Summary > Audio Summary > Document Summary > Text Search
     source_type_patterns = [
-        r"^\s*what\s+is\s+(.+?)\s*[?.!]*\s*$",
         r"^\s*what\s+type\s+is\s+(.+?)\s*[?.!]*\s*$",
         r"^\s*what\s+kind\s+of\s+file\s+is\s+(.+?)\s*[?.!]*\s*$",
         r"^\s*what\s+kind\s+of\s+file\s+is\s+the\s+(.+?)\s*[?.!]*\s*$",
@@ -1510,15 +1529,12 @@ def analyze_query(question, indexed_files=None):
         intent = INTENT_IMAGE_SUMMARY
     elif (
         modality == "image"
-        and source_hint is not None
-        and canonical_source_id is not None
         and not is_image_display_query
         and not is_image_filename_query
-        and not is_generic_file_count_query
+        and not is_count_temporal_query
         and not is_chunk_metadata_query
     ):
-        # Only route a resolved image-specific natural-language question
-        # to visual QA when no more specific image handler matched.
+        # Route natural-language question in image mode to visual QA
         intent = INTENT_IMAGE_VISUAL_QUERY
     
     elif any(word in question_lower for word in ["summarize", "summarise", "summary", "overview"]):
@@ -1540,7 +1556,7 @@ def analyze_query(question, indexed_files=None):
     )
 
     # ------------------------------------------------------------
-    # Face query classification
+    # Face query classification (CONTEXT-GATED)
     # ------------------------------------------------------------
     # Face-specific interpretation belongs to Query Understanding.
     # Handlers consume this structured result instead of reparsing
@@ -1548,53 +1564,63 @@ def analyze_query(question, indexed_files=None):
     face_intent = FaceIntent.NONE
     face_person_name = None
 
-    face_count_patterns = (
-        r"\bhow\s+many\s+(?:people|persons|person|faces)\b",
-        r"\bnumber\s+of\s+(?:people|persons|person|faces)\b",
-        r"\bcount\s+(?:the\s+)?(?:people|persons|person|faces)\b",
-    )
+    active_ext_face = os.path.splitext(active_file)[1].lower() if active_file else ""
+    is_image_file_context = active_ext_face in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+    is_image_modality_context = (modality == "image")
+    has_explicit_visual_keywords = bool(re.search(
+        r"\b(?:face|faces|photo|photos|picture|pictures|image|images|person\s+in\s+(?:the\s+)?(?:image|photo|picture)|this\s+person|in\s+this\s+photo|in\s+this\s+image)\b",
+        question_lower
+    ))
+    has_visual_context = is_image_file_context or is_image_modality_context or has_explicit_visual_keywords
 
-    face_presence_patterns = (
-        r"\bis\s+there\s+(?:a\s+)?person\b",
-        r"\bis\s+there\s+anyone\b",
-        r"\bare\s+there\s+people\b",
-        r"\bis\s+anyone\b",
-        r"\bdoes\s+the\s+image\s+contain\s+(?:a\s+)?person\b",
-        r"\bdoes\s+the\s+image\s+contain\s+people\b",
-    )
+    if has_visual_context and not is_structured_spreadsheet_query:
+        face_count_patterns = (
+            r"\bhow\s+many\s+(?:people|persons|person|faces)\b",
+            r"\bnumber\s+of\s+(?:people|persons|person|faces)\b",
+            r"\bcount\s+(?:the\s+)?(?:people|persons|person|faces)\b",
+        )
 
-    face_identity_patterns = (
-        r"\bwho\s+is\b",
-        r"\bwho\s+are\b",
-        r"\bwhose\s+face\b",
-        r"\bidentify\b",
-        r"\brecognize\b",
-        r"\bwhich\s+person\b",
-        r"\bis\s+this\s+person\b",
-    )
+        face_presence_patterns = (
+            r"\bis\s+there\s+(?:a\s+)?person\b",
+            r"\bis\s+there\s+anyone\b",
+            r"\bare\s+there\s+people\b",
+            r"\bis\s+anyone\b",
+            r"\bdoes\s+the\s+image\s+contain\s+(?:a\s+)?person\b",
+            r"\bdoes\s+the\s+image\s+contain\s+people\b",
+        )
 
-    if any(re.search(pattern, question_lower) for pattern in face_count_patterns):
-        face_intent = FaceIntent.COUNT
+        face_identity_patterns = (
+            r"\bwho\s+is\b",
+            r"\bwho\s+are\b",
+            r"\bwhose\s+face\b",
+            r"\bidentify\b",
+            r"\brecognize\b",
+            r"\bwhich\s+person\b",
+            r"\bis\s+this\s+person\b",
+        )
 
-    elif any(re.search(pattern, question_lower) for pattern in face_presence_patterns):
-        face_intent = FaceIntent.PRESENCE
+        if any(re.search(pattern, question_lower) for pattern in face_count_patterns):
+            face_intent = FaceIntent.COUNT
 
-    else:
-        face_person_name = extract_person_name_from_question(question)
+        elif any(re.search(pattern, question_lower) for pattern in face_presence_patterns):
+            face_intent = FaceIntent.PRESENCE
 
-        # A person name does not by itself mean identification.
-        # Explicit identity questions identify a face; image-search
-        # phrasing searches the persistent face memory across images.
-        if any(
-            re.search(pattern, question_lower)
-            for pattern in face_identity_patterns
-        ):
-            face_intent = FaceIntent.IDENTIFICATION
+        else:
+            face_person_name = extract_person_name_from_question(question)
 
-        elif is_face_search_query(question):
-            face_intent = FaceIntent.SEARCH
+            # A person name does not by itself mean identification.
+            # Explicit identity questions identify a face; image-search
+            # phrasing searches the persistent face memory across images.
+            if any(
+                re.search(pattern, question_lower)
+                for pattern in face_identity_patterns
+            ):
+                face_intent = FaceIntent.IDENTIFICATION
 
-    if face_intent != FaceIntent.NONE:
+            elif is_face_search_query(question):
+                face_intent = FaceIntent.SEARCH
+
+    if face_intent != FaceIntent.NONE and not is_structured_spreadsheet_query:
         intent = INTENT_IMAGE_FACE_QUERY
 
     analysis_result = {

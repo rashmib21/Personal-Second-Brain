@@ -417,7 +417,7 @@ def ask(question, active_file=None, modality=None, return_structured=False):
     question_lower = question.lower().strip()
 
     # Step 1: Query Analysis & QueryPlan Construction
-    analysis = analyze_query(question)
+    analysis = analyze_query(question, active_file=active_file, request_modality=modality)
     plan = analysis.get("plan")
 
     # Override / Apply explicit active_file context (Mode B: Sidebar File-Scoped Chat)
