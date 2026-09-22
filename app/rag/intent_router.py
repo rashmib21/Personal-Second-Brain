@@ -410,6 +410,14 @@ class IntentRouter:
                     if len(matching) == 1:
                         canonical_path = matching[0]
 
+                if not canonical_path:
+                    from app.rag.spreadsheet_query import find_applicable_spreadsheets
+                    applicable = find_applicable_spreadsheets(candidates, question)
+                    if len(applicable) == 1:
+                        canonical_path = applicable[0]
+                    elif len(applicable) > 1:
+                        candidates = applicable
+
                 # If still ambiguous, don't randomly select a workbook.
                 if not canonical_path:
                     names = [

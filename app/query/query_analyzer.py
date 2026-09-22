@@ -815,6 +815,10 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
         r"\bhow\s+many\b",
         r"\bnumber\s+of\b",
         r"\bcount\b",
+        r"\bin\s+each\b",
+        r"\bfor\s+each\b",
+        r"\bper\b",
+        r"\bby\b",
     ]
 
     spreadsheet_field_patterns = [
@@ -1165,6 +1169,10 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
             or (
                 has_spreadsheet_operation
                 and (has_spreadsheet_field or modality in {"spreadsheet", "all"})
+            )
+            or (
+                has_spreadsheet_field
+                and modality in {"spreadsheet", "all"}
             )
         )
     )

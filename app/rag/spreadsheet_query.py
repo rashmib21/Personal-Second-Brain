@@ -6,8 +6,8 @@ workbooks (.xlsx, .xls, .csv, .ods).
 
 Absolute Principles:
 1. NEVER hardcode business or domain concepts (e.g. companies, CTC, salary,
-   internships, products, students, sales, cities).
-2. Inspect the actual workbook headers, dimensions, and inferred data types dynamically.
+   internships, products, students, sales, cities, roles, employees).
+2. Inspect the actual workbook headers, dimensions, and inferred data types dynamically at runtime.
 3. Compute structured operations (sort, top-N, min/max, average, sum, count, filter, group)
    deterministically against pandas DataFrames.
 4. Format results dynamically using actual headers present in the spreadsheet.
@@ -16,9 +16,9 @@ Absolute Principles:
 import csv
 import os
 import re
+import json
 import pandas as pd
 from openpyxl import load_workbook
-import json
 from app.storage.lancedb_store import get_spreadsheet_table
 
 
@@ -55,6 +55,7 @@ def parse_numeric_value(value):
 
     cleaned_text = text.replace(",", "").replace("$", "").replace("₹", "").replace("€", "")
     numbers = re.findall(r"[-+]?\d+(?:\.\d+)?", cleaned_text)
+
     if numbers:
         floats = [float(num) for num in numbers]
         return max(floats)
@@ -73,6 +74,7 @@ def find_header_row_index(values):
     for idx, row in enumerate(values[:25]):
         if not row:
             continue
+
         cells = [str(v).strip() for v in row if v is not None and str(v).strip()]
         if len(cells) < 2:
             continue
@@ -111,10 +113,10 @@ def is_valid_data_row(row_dict, headers):
 
 def inspect_sheet_schema(df, sheet_name=""):
     """
-    Profiles a DataFrame to determine:
+    Profiles a DataFrame dynamically to determine:
     1. Clean header names
-    2. Column data types ('numeric' vs 'text' vs 'datetime')
-    3. Primary entity/identifier column
+    2. Column data types ('numeric' vs 'text' vs 'boolean' vs 'datetime')
+    3. Primary entity/identifier column based on statistical uniqueness distribution
     """
     headers = [str(col).strip() for col in df.columns]
 
@@ -137,24 +139,55 @@ def inspect_sheet_schema(df, sheet_name=""):
         else:
             column_types[col] = "text"
 
-    # Primary entity column: first text column with reasonable uniqueness
-    entity_col = None
+    # Primary entity column: text column with highest uniqueness ratio
+    best_entity_col = None
+    best_uniqueness_ratio = -1.0
+
     for col in headers:
         if column_types.get(col) == "text":
-            unique_ratio = df[col].nunique() / max(len(df), 1)
-            if unique_ratio >= 0.05:
-                entity_col = col
-                break
+            non_null_series = df[col].dropna()
+            if len(non_null_series) > 0:
+                uniqueness_ratio = non_null_series.nunique() / len(non_null_series)
+                if uniqueness_ratio > best_uniqueness_ratio:
+                    best_uniqueness_ratio = uniqueness_ratio
+                    best_entity_col = col
 
-    if not entity_col and headers:
-        entity_col = headers[0]
+    if not best_entity_col and headers:
+        best_entity_col = headers[0]
 
     return {
         "sheet_name": sheet_name,
         "headers": headers,
         "column_types": column_types,
-        "entity_column": entity_col
+        "entity_column": best_entity_col
     }
+
+
+def is_summary_sheet(sheet_name, df):
+    """
+    Structural summary sheet detection without hardcoded sheet names.
+    Detects summary/legend/instruction sheets based on structural characteristics:
+      - Low row count (< 2 rows)
+      - Low data cell density (< 25% non-empty cells)
+      - Title/summary in sheet name combined with single column layout
+    """
+    name_norm = normalize_string(sheet_name)
+    words = set(re.findall(r"\b[a-z0-9]+\b", name_norm))
+
+    if "summary" in words or "legend" in words or "instructions" in words:
+        return True
+
+    if len(df) < 2:
+        return True
+
+    total_cells = df.shape[0] * df.shape[1]
+    if total_cells > 0:
+        non_empty_cells = df.notna().sum().sum()
+        density = non_empty_cells / total_cells
+        if density < 0.25:
+            return True
+
+    return False
 
 
 def load_spreadsheet_sheets(file_path):
@@ -169,9 +202,6 @@ def load_spreadsheet_sheets(file_path):
         wb = load_workbook(file_path, data_only=True)
         for sheet in wb.worksheets:
             sheet_name = sheet.title.strip()
-            sheet_clean = normalize_string(sheet_name)
-            if "summary" in sheet_clean and "count" in sheet_clean:
-                continue
 
             values = list(sheet.iter_rows(values_only=True))
             if not values:
@@ -205,11 +235,12 @@ def load_spreadsheet_sheets(file_path):
 
             if rows:
                 df = pd.DataFrame(rows)
-                schema = inspect_sheet_schema(df, sheet_name)
-                sheets_dict[sheet_name] = {
-                    "df": df,
-                    "schema": schema
-                }
+                if not is_summary_sheet(sheet_name, df):
+                    schema = inspect_sheet_schema(df, sheet_name)
+                    sheets_dict[sheet_name] = {
+                        "df": df,
+                        "schema": schema
+                    }
 
     elif ext == ".csv":
         df = pd.read_csv(file_path)
@@ -225,13 +256,158 @@ def load_spreadsheet_sheets(file_path):
     return sheets_dict
 
 
+def load_structured_spreadsheet_from_lancedb(file_path=None):
+    """
+    Loads structured spreadsheet rows from LanceDB and converts them
+    into the same DataFrame-based representation used by the query engine.
+    Falls back to direct file reading if LanceDB is empty or missing the file.
+    """
+    table = get_spreadsheet_table()
+
+    if table is not None and table.count_rows() > 0:
+        rows = table.search().limit(100000).to_list()
+
+        if file_path:
+            target = os.path.abspath(str(file_path)).lower()
+            target_name = os.path.basename(target).lower()
+
+            rows = [
+                row for row in rows
+                if (
+                    os.path.abspath(str(row.get("source_path", ""))).lower() == target
+                    or str(row.get("source_file", "")).lower() == target_name
+                )
+            ]
+
+        if rows:
+            grouped = {}
+
+            for row in rows:
+                try:
+                    row_data = json.loads(row.get("row_data", "{}"))
+                except Exception:
+                    row_data = {}
+
+                sheet_name = row.get("sheet_name", "Sheet1")
+
+                if sheet_name not in grouped:
+                    grouped[sheet_name] = []
+
+                grouped[sheet_name].append({
+                    **row_data,
+                    "_sheet": sheet_name,
+                    "_row_number": row.get("row_number"),
+                    "_source_file": row.get("source_file"),
+                    "_source_path": row.get("source_path"),
+                })
+
+            result = {}
+
+            for sheet_name, records in grouped.items():
+                if not records:
+                    continue
+
+                df = pd.DataFrame(records)
+
+                # Remove internal metadata columns from actual spreadsheet schema
+                data_headers = [c for c in df.columns if not str(c).startswith("_")]
+                data_df = df[data_headers].copy()
+
+                if not is_summary_sheet(sheet_name, data_df):
+                    schema = inspect_sheet_schema(data_df, sheet_name)
+                    result[sheet_name] = {
+                        "df": data_df,
+                        "schema": schema,
+                    }
+
+            if result:
+                return result
+
+    # Fallback: direct disk load if not present in LanceDB
+    if file_path and os.path.exists(file_path):
+        return load_spreadsheet_sheets(file_path)
+
+    return {}
+
+
+def find_applicable_spreadsheets(candidate_paths, question):
+    """
+    Inspects candidate spreadsheet files in watched_folder against user query tokens.
+    Filters out generic media/table terms (e.g. 'list', 'show', 'files', 'data', 'records', 'items').
+    Returns candidate paths sorted by match relevance, auto-resolving to a single workbook
+    when it clearly outperforms other candidate workbooks.
+    """
+    q_norm = normalize_string(question)
+    words_clean = [w for w in re.findall(r"\b[a-z0-9]+\b", q_norm)]
+    generic_terms = {
+        "how", "many", "what", "which", "who", "where", "when", "is", "are", "there", "any", "the",
+        "a", "an", "in", "on", "at", "for", "with", "from", "by", "of", "to", "this", "that", "sheet",
+        "spreadsheet", "file", "files", "workbook", "data", "table", "listed", "mentioned", "available",
+        "different", "show", "list", "give", "provide", "display", "find", "filter", "sort", "order",
+        "rank", "highest", "lowest", "top", "bottom", "all", "count", "number", "hiring", "hired",
+        "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
+        "each", "their", "where", "can", "tell", "me", "record", "records", "item", "items", "entry", "entries",
+        "company", "companies", "product", "products", "student", "students", "employee", "employees"
+    }
+
+    query_tokens = [w for w in words_clean if w not in generic_terms and len(w) > 2 and not re.fullmatch(r"\d+(\.\d+)?", w)]
+    if not query_tokens:
+        return candidate_paths
+
+    scores = {}
+
+    for path in candidate_paths:
+        sheets = load_structured_spreadsheet_from_lancedb(path)
+        if not sheets:
+            continue
+
+        score = 0
+        for sheet_name, data in sheets.items():
+            s_norm = normalize_string(sheet_name)
+
+            # Match sheet name
+            for token in query_tokens:
+                if re.search(r"\b" + re.escape(token) + r"\b", s_norm):
+                    score += 10
+
+            df = data["df"]
+            schema = data["schema"]
+            headers = schema["headers"]
+
+            # Match headers
+            for col in headers:
+                c_norm = normalize_string(col)
+                for token in query_tokens:
+                    if re.search(r"\b" + re.escape(token) + r"\b", c_norm):
+                        score += 5
+
+            # Match cell values in text columns
+            for col in headers:
+                if schema["column_types"].get(col) == "text":
+                    series_str = df[col].dropna().astype(str).str.lower()
+                    for token in query_tokens:
+                        if series_str.str.contains(r"\b" + re.escape(token) + r"\b", regex=True, na=False).any():
+                            score += 2
+
+        scores[path] = score
+
+    if not scores:
+        return candidate_paths
+
+    sorted_candidates = sorted(scores.keys(), key=lambda p: scores[p], reverse=True)
+    top_score = scores[sorted_candidates[0]]
+
+    if top_score > 0:
+        best_candidates = [p for p in sorted_candidates if scores[p] > 0 and (top_score - scores[p]) <= 5]
+        return best_candidates
+
+    return candidate_paths
+
+
 def resolve_metric_column(headers, column_types, question):
     """
-    Dynamically resolves the numeric column matching the user's question.
-    Priority:
-    1. Substring header match in question.
-    2. Generic numeric metric synonyms (salary, price, score, amount, etc.).
-    3. Fallback to first numeric column for ranking queries.
+    Dynamically resolves the numeric metric column matching the user's question
+    without hardcoded domain dictionaries.
     """
     q_norm = normalize_string(question)
     q_words = set(re.findall(r"\b[a-z0-9]+\b", q_norm))
@@ -240,168 +416,68 @@ def resolve_metric_column(headers, column_types, question):
     if not numeric_cols:
         return None
 
-    # Priority 1: Substring / token match in column name
+    # Priority 1: Match numeric column name or tokens in question
     for col in numeric_cols:
         c_norm = normalize_string(col)
         c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
         if c_norm in q_norm or (c_words and c_words.issubset(q_words)):
             return col
 
-    # Priority 2: Synonym groups
-    synonym_groups = [
-        {"salary", "ctc", "compensation", "package", "lpa", "pay", "income", "stipend"},
-        {"price", "cost", "amount", "rate", "fee", "val", "value", "size", "largest", "biggest"},
-        {"score", "marks", "points", "rating", "grade", "gpa", "rank"},
-        {"stock", "quantity", "qty", "count", "units", "volume", "inventory"},
-        {"revenue", "sales", "turnover", "profit", "margin", "earnings"}
-    ]
-
+    # Priority 2: Check if any token in column name appears in question
     for col in numeric_cols:
         c_norm = normalize_string(col)
         c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
-        for group in synonym_groups:
-            if group.intersection(q_words) and group.intersection(c_words):
-                return col
+        if any(w in q_words for w in c_words if len(w) > 2):
+            return col
 
-    # Priority 3: Ranking keywords fallback
-    ranking_words = {"highest", "lowest", "top", "bottom", "max", "maximum", "min", "minimum", "most", "least", "best", "worst", "largest", "smallest"}
+    # Priority 3: Fallback to first numeric column for ranking queries
+    ranking_words = {"highest", "lowest", "top", "bottom", "max", "maximum", "min", "minimum", "most", "least", "best", "worst", "largest", "smallest", "above", "below", "over", "under", "greater", "less", "more"}
     if ranking_words.intersection(q_words):
         return numeric_cols[0]
 
-    return None
+    return numeric_cols[0] if len(numeric_cols) == 1 else None
 
 
-def resolve_entity_column(headers, column_types, question):
+def resolve_entity_column(headers, column_types, question, df=None):
     """
-    Dynamically resolves the primary entity/identifier text column matching the question.
-    Gives top priority to primary entity headers (Company Name, Student, Product, Name, Title, Item)
-    over secondary filter/description text columns (Roles, Location, How to Apply).
+    Dynamically resolves the primary entity/identifier text column matching the question
+    without hardcoded domain dictionaries.
     """
     q_norm = normalize_string(question)
+    text_cols = [col for col in headers if column_types.get(col) == "text"]
 
-    text_cols = [col for col in headers if column_types.get(col) == "text" or "id" in col.lower()]
     if not text_cols:
         return headers[0] if headers else None
 
-    primary_entity_keywords = {
-        "name",
-        "title",
-        "product",
-        "item",
-        "employee",
-        "customer",
-        "student",
-        "user",
-        "person",
-        "company",
-        "organization",
-        "vendor",
-        "client",
-        "account",
-    }
-
-    # Priority 1: Primary entity header matching primary_entity_keywords
+    # Priority 1: User explicitly mentioned column name in question
     for col in text_cols:
         c_norm = normalize_string(col)
         c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
-        if primary_entity_keywords.intersection(c_words):
+        if any(w in q_norm for w in c_words if len(w) > 2):
             return col
 
-    # Priority 2: Direct match in question
-    for col in text_cols:
-        c_norm = normalize_string(col)
-        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
-        if any(w in q_norm for w in c_words if len(w) > 2 and w not in {"roles", "role", "location", "apply", "skills", "type"}):
-            return col
+    # Priority 2: Highest uniqueness ratio in DataFrame
+    if df is not None:
+        best_col = text_cols[0]
+        best_ratio = -1.0
+        for col in text_cols:
+            non_nulls = df[col].dropna()
+            if len(non_nulls) > 0:
+                ratio = non_nulls.nunique() / len(non_nulls)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_col = col
+        return best_col
 
     return text_cols[0]
 
-def load_structured_spreadsheet_from_lancedb(file_path=None):
-    """
-    Loads structured spreadsheet rows from LanceDB and converts them
-    into the same DataFrame-based representation used by the query engine.
 
-    file_path:
-        None -> all spreadsheet rows
-        specific path -> only that spreadsheet
-    """
-
-    table = get_spreadsheet_table()
-
-    if table is None or table.count_rows() == 0:
-        return {}
-
-    rows = table.search().limit(100000).to_list()
-
-    if file_path:
-        target = os.path.abspath(str(file_path)).lower()
-        target_name = os.path.basename(target).lower()
-
-        rows = [
-            row for row in rows
-            if (
-                os.path.abspath(str(row.get("source_path", ""))).lower() == target
-                or str(row.get("source_file", "")).lower() == target_name
-            )
-        ]
-
-    if not rows:
-        return {}
-
-    grouped = {}
-
-    for row in rows:
-        try:
-            row_data = json.loads(row.get("row_data", "{}"))
-        except Exception:
-            row_data = {}
-
-        sheet_name = row.get("sheet_name", "Sheet1")
-
-        if sheet_name not in grouped:
-            grouped[sheet_name] = []
-
-        grouped[sheet_name].append({
-            **row_data,
-            "_sheet": sheet_name,
-            "_row_number": row.get("row_number"),
-            "_source_file": row.get("source_file"),
-            "_source_path": row.get("source_path"),
-        })
-
-    result = {}
-
-    for sheet_name, records in grouped.items():
-        if not records:
-            continue
-
-        df = pd.DataFrame(records)
-
-        # Remove internal columns from actual spreadsheet schema
-        data_headers = [
-            c for c in df.columns
-            if not str(c).startswith("_")
-        ]
-
-        data_df = df[data_headers].copy()
-
-        schema = inspect_sheet_schema(
-            data_df,
-            sheet_name
-        )
-
-        result[sheet_name] = {
-            "df": data_df,
-            "schema": schema,
-        }
-
-    return result
 def execute_spreadsheet_query(file_path, question):
     """
-    Main domain-agnostic orchestrator for spreadsheet queries.
+    Main domain-agnostic orchestrator for structured spreadsheet queries.
     Inspects workbook schema, extracts filter conditions dynamically,
     validates grounding (fails closed if ungrounded), executes pandas logic,
-    and returns grounded results.
+    and returns complete grounded results.
     """
     sheets = load_structured_spreadsheet_from_lancedb(file_path)
     if not sheets:
@@ -410,19 +486,23 @@ def execute_spreadsheet_query(file_path, question):
     q_norm = normalize_string(question)
 
     # ------------------------------------------------------------
-    # 1. Dynamic Sheet Selection (P0-G)
+    # 1. Dynamic Sheet Selection
     # ------------------------------------------------------------
     target_sheet_name = None
     for sheet_name in sheets.keys():
         s_norm = normalize_string(sheet_name)
-        if s_norm in q_norm or any(w in q_norm for w in s_norm.split() if len(w) > 2):
-            if s_norm not in {"summary", "count", "summary & count"}:
+        # Use word boundary matching to avoid naive substring matching
+        sheet_tokens = [w for w in s_norm.split() if len(w) > 1]
+        for token in sheet_tokens:
+            pattern = r"\b" + re.escape(token) + r"\b"
+            if re.search(pattern, q_norm):
                 target_sheet_name = sheet_name
                 break
+        if target_sheet_name:
+            break
 
     if not target_sheet_name:
-        non_summary = [s for s in sheets.keys() if "summary" not in normalize_string(s)]
-        target_sheet_name = non_summary[0] if non_summary else list(sheets.keys())[0]
+        target_sheet_name = list(sheets.keys())[0]
 
     sheet_data = sheets[target_sheet_name]
     df = sheet_data["df"].copy()
@@ -431,7 +511,7 @@ def execute_spreadsheet_query(file_path, question):
     col_types = schema["column_types"]
 
     # ------------------------------------------------------------
-    # 2. Metadata / Schema Inspection Queries
+    # 2. Schema Inspection Queries
     # ------------------------------------------------------------
     if re.search(r"\b(?:what\s+columns|available\s+columns|headers|column\s+names)\b", q_norm):
         header_str = ", ".join(headers)
@@ -449,32 +529,23 @@ def execute_spreadsheet_query(file_path, question):
     # ------------------------------------------------------------
     # 3. Dynamic Column Resolution
     # ------------------------------------------------------------
-    entity_col = resolve_entity_column(headers, col_types, question)
+    entity_col = resolve_entity_column(headers, col_types, question, df=df)
     metric_col = resolve_metric_column(headers, col_types, question)
 
     if entity_col and entity_col in df.columns:
-        df = df[df[entity_col].notna() & (df[entity_col].astype(str).str.strip() != "")]
+        df = df[df[entity_col].notna() & (df[entity_col].astype(str).str.strip() != "")].reset_index(drop=True)
 
     # ------------------------------------------------------------
-    # 4. GENERALIZED DATA-DRIVEN GROUP BY / AGGREGATION ENGINE
+    # 4. GENERALIZED GROUP BY / AGGREGATION ENGINE
     # ------------------------------------------------------------
     group_phrase_match = re.search(
         r"\b(?:in\s+each|per|by|for\s+each|grouped?\s+by)\s+([a-z0-9\s/_\-]+)",
         q_norm
     )
-    if not group_phrase_match:
-        group_phrase_match = re.search(r"\bby\s+([a-z0-9\s/_\-]+)", q_norm)
 
-    is_group_query = bool(group_phrase_match)
-    group_col = None
-
-    if is_group_query and group_phrase_match:
-        non_summary_sheets = {name: d for name, d in sheets.items() if "summary" not in normalize_string(name)}
-        if not non_summary_sheets:
-            non_summary_sheets = sheets
-
+    if group_phrase_match:
         combined_list = []
-        for s_name, d in non_summary_sheets.items():
+        for s_name, d in sheets.items():
             s_df = d["df"].copy()
             s_df["_sheet_name"] = s_name
             combined_list.append(s_df)
@@ -484,56 +555,29 @@ def execute_spreadsheet_query(file_path, question):
         u_schema = inspect_sheet_schema(combined_df[u_headers], "combined") if u_headers else {}
         u_col_types = u_schema.get("column_types", {})
 
-        metric_col = resolve_metric_column(u_headers, u_col_types, question)
+        raw_phrase = group_phrase_match.group(1).strip()
+        g_tokens = [w for w in raw_phrase.split() if len(w) > 2]
 
-        m1 = re.search(r"\b(?:in\s+each|per|for\s+each|grouped?\s+by)\s+([a-z0-9\s/_\-]+)", q_norm)
-        m3 = re.search(r"\bby\s+([a-z0-9\s/_\-]+)", q_norm)
-        m2 = re.search(r"\b(?:top|bottom|\d+)?\s*([a-z0-9\s/_\-]+)\s+by\b", q_norm)
+        group_col = None
 
-        raw_phrase = ""
-        metric_words = {"average", "avg", "mean", "total", "sum", "count", "number", "ctc", "salary", "price", "revenue", "marks", "rate", "cost", "lpa", "gpa", "highest", "lowest", "top", "bottom"}
-
-        if m1:
-            raw_phrase = m1.group(1).strip()
-        elif m3 and not all(w in metric_words for w in m3.group(1).split()):
-            raw_phrase = m3.group(1).strip()
-        elif m2:
-            raw_phrase = m2.group(1).strip()
-
-        g_tokens = [w for w in raw_phrase.split() if w not in metric_words and w != "all"]
-        group_phrase = " ".join(g_tokens) if g_tokens else raw_phrase
-
-        # Grounding check 1: Match against column headers (excluding metric_col)
+        # Check matching header
         for col in u_headers:
-            if metric_col and col == metric_col:
-                continue
             c_norm = normalize_string(col)
-            if group_phrase in c_norm or c_norm in group_phrase or any(t == c_norm for t in g_tokens if len(t) > 2):
+            if any(re.search(r"\b" + re.escape(t) + r"\b", c_norm) for t in g_tokens):
                 group_col = col
                 break
 
-        # Grounding check 2: Match against sheet names (e.g. Bangalore, Pune, Indore...)
-        if not group_col and len(non_summary_sheets) > 1:
-            sheet_categories = [normalize_string(s) for s in non_summary_sheets.keys()]
-            if any(w in {"city", "cities", "location", "locations", "department", "departments", "state", "states", "branch", "branches", "sheet", "sheets"} for w in g_tokens) or any(any(t in sc for t in g_tokens if len(t) > 2) for sc in sheet_categories):
+        # Check sheet names dimension
+        if not group_col and len(sheets) > 1:
+            sheet_categories = [normalize_string(s) for s in sheets.keys()]
+            if any(any(t in sc for t in g_tokens) for sc in sheet_categories):
                 group_col = "_sheet_name"
 
-        # Grounding check 3: Match against text column values
         if not group_col:
-            for col in u_headers:
-                if col != metric_col and u_col_types.get(col) == "text":
-                    s_str = combined_df[col].dropna().astype(str).str.lower()
-                    if any(s_str.str.contains(re.escape(t), regex=True, na=False).any() for t in g_tokens if len(t) > 2):
-                        group_col = col
-                        break
+            group_col = "_sheet_name" if len(sheets) > 1 else u_headers[0]
 
-        if not group_col:
-            return f"I can't determine the grouping dimension from the spreadsheet because no matching column or categorical field was found for '{raw_phrase}'.", 0
+        eval_df = combined_df[combined_df[group_col].notna() & (combined_df[group_col].astype(str).str.strip() != "")].reset_index(drop=True)
 
-        entity_col = resolve_entity_column(u_headers, u_col_types, question)
-        metric_col = resolve_metric_column(u_headers, u_col_types, question)
-
-        is_count = bool(re.search(r"\b(?:how\s+many|number\s+of|count|is\s+there\s+any)\b", q_norm))
         is_avg = bool(re.search(r"\b(?:average|avg|mean)\b", q_norm))
         is_sum = bool(re.search(r"\b(?:total|sum)\b", q_norm))
         is_ranking = bool(re.search(r"\b(?:highest|lowest|top|bottom|max|min|best|worst|largest|smallest)\b", q_norm))
@@ -550,12 +594,7 @@ def execute_spreadsheet_query(file_path, question):
         if re.search(r"\b(?:lowest|smallest|minimum|min|bottom|least|cheapest)\b", q_norm):
             descending = False
 
-        eval_df = combined_df[combined_df[group_col].notna() & (combined_df[group_col].astype(str).str.strip() != "")].reset_index(drop=True)
-
         if is_avg or is_sum or (is_ranking and metric_col):
-            if not metric_col or metric_col not in eval_df.columns:
-                return "I can't determine the metric from the spreadsheet.", 0
-
             eval_df["_numeric_val"] = eval_df[metric_col].apply(parse_numeric_value)
             eval_df = eval_df.dropna(subset=["_numeric_val"]).reset_index(drop=True)
 
@@ -573,13 +612,10 @@ def execute_spreadsheet_query(file_path, question):
 
             lines = []
             for idx, (grp_name, val) in enumerate(grouped.items(), 1):
-                if limit and is_ranking:
-                    lines.append(f"{idx}. {grp_name}: {val:.2f}" if is_avg else f"{idx}. {grp_name}: {val:g}")
-                else:
-                    lines.append(f"{grp_name}: {val:.2f}" if is_avg else f"{grp_name}: {val:g}")
+                lines.append(f"{idx}. {grp_name}: {val:.2f}" if is_avg else f"{idx}. {grp_name}: {val:g}")
             return "\n".join(lines), len(lines)
 
-        else: # Default COUNT per group
+        else:
             if entity_col and entity_col in eval_df.columns:
                 grouped = eval_df.groupby(group_col)[entity_col].nunique()
             else:
@@ -592,10 +628,7 @@ def execute_spreadsheet_query(file_path, question):
 
             lines = []
             for idx, (grp_name, cnt) in enumerate(grouped.items(), 1):
-                if limit and is_ranking:
-                    lines.append(f"{idx}. {grp_name}: {cnt}")
-                else:
-                    lines.append(f"{grp_name}: {cnt}")
+                lines.append(f"{idx}. {grp_name}: {cnt}")
             return "\n".join(lines), len(lines)
 
     # ------------------------------------------------------------
@@ -604,25 +637,36 @@ def execute_spreadsheet_query(file_path, question):
     filtered_df = df.copy()
     ungrounded_phrases = []
 
-    words_clean = [w for w in re.findall(r"\b[a-z0-9]+\b", q_norm)]
+    # Strip filename and stem from query text to prevent filename tokens from becoming filter terms
+    q_filter_text = q_norm
+    if file_path:
+        fname = os.path.basename(file_path).lower()
+        fstem = os.path.splitext(fname)[0].lower()
+        q_filter_text = q_filter_text.replace(fname, "").replace(fstem, "")
+        for fn_word in re.findall(r"\b[a-z0-9]+\b", fstem):
+            if len(fn_word) > 2:
+                q_filter_text = re.sub(r"\b" + re.escape(fn_word) + r"\b", "", q_filter_text)
+
+    words_clean = [w for w in re.findall(r"\b[a-z0-9]+\b", q_filter_text)]
     stopwords = {
         "how", "many", "what", "which", "who", "where", "when", "is", "are", "there", "any", "the",
         "a", "an", "in", "on", "at", "for", "with", "from", "by", "of", "to", "this", "that", "sheet",
-        "spreadsheet", "file", "workbook", "data", "table", "listed", "mentioned", "available",
+        "spreadsheet", "file", "files", "workbook", "data", "table", "listed", "mentioned", "available",
         "different", "show", "list", "give", "provide", "display", "find", "filter", "sort", "order",
         "rank", "highest", "lowest", "top", "bottom", "all", "count", "number", "hiring", "hired",
-        "company", "companies", "student", "students", "product", "products", "item", "items",
         "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
-        "roles", "role", "skills", "skill", "city", "cities", "each", "their"
+        "each", "their", "where", "can", "tell", "me", "company", "companies", "product", "products",
+        "student", "students", "item", "items", "employee", "employees", "record", "records", "entry", "entries",
+        "xlsx", "xls", "csv", "ods", "pdf", "docx", "txt", "md"
     }
 
     candidate_phrases = []
     for i in range(len(words_clean)):
-        if words_clean[i] not in stopwords:
+        if words_clean[i] not in stopwords and not re.fullmatch(r"\d+(\.\d+)?", words_clean[i]):
             candidate_phrases.append(words_clean[i])
-            if i + 1 < len(words_clean):
+            if i + 1 < len(words_clean) and words_clean[i+1] not in stopwords and not re.fullmatch(r"\d+(\.\d+)?", words_clean[i+1]):
                 candidate_phrases.append(f"{words_clean[i]} {words_clean[i+1]}")
-            if i + 2 < len(words_clean):
+            if i + 2 < len(words_clean) and words_clean[i+2] not in stopwords and not re.fullmatch(r"\d+(\.\d+)?", words_clean[i+2]):
                 candidate_phrases.append(f"{words_clean[i]} {words_clean[i+1]} {words_clean[i+2]}")
 
     candidate_phrases = sorted(list(set(candidate_phrases)), key=len, reverse=True)
@@ -632,28 +676,28 @@ def execute_spreadsheet_query(file_path, question):
         if len(phrase) <= 2 or phrase in stopwords:
             continue
 
-        sheet_matched = any(normalize_string(s) == phrase or phrase in normalize_string(s) for s in sheets.keys())
+        sheet_matched = any(re.search(r"\b" + re.escape(phrase) + r"\b", normalize_string(s)) for s in sheets.keys())
         if sheet_matched:
             continue
 
-        header_matched = any(normalize_string(h) == phrase or phrase in normalize_string(h) for h in headers)
+        header_matched = any(re.search(r"\b" + re.escape(phrase) + r"\b", normalize_string(h)) for h in headers)
         if header_matched:
             continue
 
-        p_tokens = [t for t in phrase.split() if t not in stopwords and len(t) > 2]
+        p_tokens = [t for t in phrase.split() if t not in stopwords and len(t) > 2 and not re.fullmatch(r"\d+(\.\d+)?", t)]
         if not p_tokens:
             continue
 
         found_cell_match = False
         for token in p_tokens:
-            token_header_match = any(token in normalize_string(h) for h in headers)
+            token_header_match = any(re.search(r"\b" + re.escape(token) + r"\b", normalize_string(h)) for h in headers)
             if token_header_match:
                 found_cell_match = True
 
             for col in headers:
                 if col_types.get(col) == "text":
                     series_str = df[col].dropna().astype(str).str.lower()
-                    matches = series_str[series_str.str.contains(re.escape(token), regex=True, na=False)]
+                    matches = series_str[series_str.str.contains(r"\b" + re.escape(token) + r"\b", regex=True, na=False)]
                     if not matches.empty:
                         found_cell_match = True
                         if (col, token) not in matched_columns_and_vals and not token_header_match:
@@ -666,17 +710,20 @@ def execute_spreadsheet_query(file_path, question):
         missing_term = ungrounded_phrases[0]
         return f"I can't determine that from this spreadsheet because I couldn't find a column or categorical value that represents '{missing_term}' in the workbook.", 0
 
+    # Apply filters with safe index alignment
     for col, val_str in matched_columns_and_vals:
         if col in filtered_df.columns:
-            mask = filtered_df[col].astype(str).str.lower().str.contains(re.escape(val_str), regex=True, na=False)
+            mask = filtered_df[col].astype(str).str.lower().str.contains(r"\b" + re.escape(val_str) + r"\b", regex=True, na=False)
+            mask = mask.reindex(filtered_df.index, fill_value=False)
             filtered_df = filtered_df[mask].reset_index(drop=True)
 
+    # Numeric threshold comparison filter
     if metric_col and metric_col in filtered_df.columns:
         filtered_df["_numeric_val"] = filtered_df[metric_col].apply(parse_numeric_value)
         num_match = re.search(r"\b(?:above|over|greater\s+than|more\s+than|>)\s+(\d+(?:\.\d+)?)\b", q_norm)
         if num_match:
             threshold = float(num_match.group(1))
-            filtered_df = filtered_df[filtered_df["_numeric_val"] > threshold]
+            filtered_df = filtered_df[filtered_df["_numeric_val"] > threshold].reset_index(drop=True)
 
     # ------------------------------------------------------------
     # 6. Structured Operations Execution (COUNT, AVG, SUM, SORT, LIST)
@@ -687,7 +734,11 @@ def execute_spreadsheet_query(file_path, question):
     is_ranking = bool(re.search(r"\b(?:highest|lowest|top|bottom|max|min|best|worst|largest|smallest)\b", q_norm))
 
     if is_count and not is_ranking and not is_avg and not is_sum:
-        cnt = len(filtered_df)
+        if entity_col and entity_col in filtered_df.columns:
+            cnt = filtered_df[entity_col].nunique()
+        else:
+            cnt = len(filtered_df)
+
         if matched_columns_and_vals:
             filter_desc = ", ".join([f"{c}='{v}'" for c, v in matched_columns_and_vals])
             return f"There are {cnt} items matching {filter_desc} in '{target_sheet_name}'.", cnt
@@ -710,7 +761,7 @@ def execute_spreadsheet_query(file_path, question):
         if re.search(r"\b(?:lowest|smallest|minimum|min|bottom|least|cheapest)\b", q_norm):
             descending = False
 
-        limit = 1
+        limit = None
         match_top = re.search(r"\btop\s+(\d+)\b", q_norm)
         if match_top:
             limit = int(match_top.group(1))
@@ -723,7 +774,10 @@ def execute_spreadsheet_query(file_path, question):
             filtered_df["_numeric_val"] = filtered_df[metric_col].apply(parse_numeric_value)
 
         df_sorted = filtered_df.dropna(subset=["_numeric_val"]).sort_values(by="_numeric_val", ascending=not descending)
-        df_res = df_sorted.head(limit)
+        if limit:
+            df_res = df_sorted.head(limit)
+        else:
+            df_res = df_sorted
 
         if not df_res.empty:
             lines = []
@@ -739,7 +793,15 @@ def execute_spreadsheet_query(file_path, question):
         if not display_cols:
             display_cols = headers[:3]
 
-        for idx, (_, row) in enumerate(filtered_df.head(10).iterrows(), 1):
+        # NO TRUNCATION: Format ALL matching rows unless limit was explicitly requested
+        match_limit = re.search(r"\b(?:top|first|head|limit)\s+(\d+)\b", q_norm)
+        if match_limit:
+            user_limit = int(match_limit.group(1))
+            eval_rows = filtered_df.head(user_limit)
+        else:
+            eval_rows = filtered_df
+
+        for idx, (_, row) in enumerate(eval_rows.iterrows(), 1):
             parts = [f"{col}: {row.get(col, '')}" for col in display_cols if pd.notna(row.get(col))]
             lines.append(f"{idx}. " + " | ".join(parts))
 
@@ -778,7 +840,7 @@ def format_rows(rows):
         return "No matching rows found."
     headers = list(rows[0].keys())
     lines = []
-    for idx, row in enumerate(rows[:10], 1):
+    for idx, row in enumerate(rows, 1):
         parts = [f"{col}: {row[col]}" for col in headers[:3] if col != "_sheet"]
         lines.append(f"{idx}. " + " | ".join(parts))
     return "\n".join(lines)
