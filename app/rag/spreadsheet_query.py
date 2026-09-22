@@ -456,27 +456,147 @@ def execute_spreadsheet_query(file_path, question):
         df = df[df[entity_col].notna() & (df[entity_col].astype(str).str.strip() != "")]
 
     # ------------------------------------------------------------
-    # 4. Multi-sheet / Group-by Aggregations (e.g. City / Sheet counts)
+    # 4. GENERALIZED DATA-DRIVEN GROUP BY / AGGREGATION ENGINE
     # ------------------------------------------------------------
-    is_city_group_query = bool(re.search(r"\b(?:city|cities|location|locations|department|branch)\b", q_norm))
-    if is_city_group_query:
-        non_summary_sheets = [name for name in sheets.keys() if "summary" not in normalize_string(name)]
-        if len(non_summary_sheets) > 1:
-            if re.search(r"\b(?:different|distinct|unique|all|list)\b", q_norm) and not re.search(r"\b(?:count|highest|top|most)\b", q_norm):
-                city_str = ", ".join(non_summary_sheets)
-                return f"The cities mentioned in the workbook sheets are: {city_str}.", len(non_summary_sheets)
+    group_phrase_match = re.search(
+        r"\b(?:in\s+each|per|by|for\s+each|grouped?\s+by)\s+([a-z0-9\s/_\-]+)",
+        q_norm
+    )
+    if not group_phrase_match:
+        group_phrase_match = re.search(r"\bby\s+([a-z0-9\s/_\-]+)", q_norm)
 
-            if re.search(r"\b(?:highest|top|most|count|number)\b", q_norm):
-                sheet_counts = {name: len(data["df"]) for name, data in sheets.items() if "summary" not in normalize_string(name)}
-                sorted_sheets = sorted(sheet_counts.items(), key=lambda x: x[1], reverse=True)
-                match_top = re.search(r"\btop\s+(\d+)\b", q_norm)
-                limit = int(match_top.group(1)) if match_top else 1
-                if limit == 1:
-                    top_name, top_count = sorted_sheets[0]
-                    return f"The sheet/city with the highest company count is '{top_name}' with {top_count} items.", top_count
+    is_group_query = bool(group_phrase_match)
+    group_col = None
+
+    if is_group_query and group_phrase_match:
+        non_summary_sheets = {name: d for name, d in sheets.items() if "summary" not in normalize_string(name)}
+        if not non_summary_sheets:
+            non_summary_sheets = sheets
+
+        combined_list = []
+        for s_name, d in non_summary_sheets.items():
+            s_df = d["df"].copy()
+            s_df["_sheet_name"] = s_name
+            combined_list.append(s_df)
+
+        combined_df = pd.concat(combined_list, ignore_index=True).reset_index(drop=True)
+        u_headers = [c for c in combined_df.columns if not str(c).startswith("_")]
+        u_schema = inspect_sheet_schema(combined_df[u_headers], "combined") if u_headers else {}
+        u_col_types = u_schema.get("column_types", {})
+
+        metric_col = resolve_metric_column(u_headers, u_col_types, question)
+
+        m1 = re.search(r"\b(?:in\s+each|per|for\s+each|grouped?\s+by)\s+([a-z0-9\s/_\-]+)", q_norm)
+        m3 = re.search(r"\bby\s+([a-z0-9\s/_\-]+)", q_norm)
+        m2 = re.search(r"\b(?:top|bottom|\d+)?\s*([a-z0-9\s/_\-]+)\s+by\b", q_norm)
+
+        raw_phrase = ""
+        metric_words = {"average", "avg", "mean", "total", "sum", "count", "number", "ctc", "salary", "price", "revenue", "marks", "rate", "cost", "lpa", "gpa", "highest", "lowest", "top", "bottom"}
+
+        if m1:
+            raw_phrase = m1.group(1).strip()
+        elif m3 and not all(w in metric_words for w in m3.group(1).split()):
+            raw_phrase = m3.group(1).strip()
+        elif m2:
+            raw_phrase = m2.group(1).strip()
+
+        g_tokens = [w for w in raw_phrase.split() if w not in metric_words and w != "all"]
+        group_phrase = " ".join(g_tokens) if g_tokens else raw_phrase
+
+        # Grounding check 1: Match against column headers (excluding metric_col)
+        for col in u_headers:
+            if metric_col and col == metric_col:
+                continue
+            c_norm = normalize_string(col)
+            if group_phrase in c_norm or c_norm in group_phrase or any(t == c_norm for t in g_tokens if len(t) > 2):
+                group_col = col
+                break
+
+        # Grounding check 2: Match against sheet names (e.g. Bangalore, Pune, Indore...)
+        if not group_col and len(non_summary_sheets) > 1:
+            sheet_categories = [normalize_string(s) for s in non_summary_sheets.keys()]
+            if any(w in {"city", "cities", "location", "locations", "department", "departments", "state", "states", "branch", "branches", "sheet", "sheets"} for w in g_tokens) or any(any(t in sc for t in g_tokens if len(t) > 2) for sc in sheet_categories):
+                group_col = "_sheet_name"
+
+        # Grounding check 3: Match against text column values
+        if not group_col:
+            for col in u_headers:
+                if col != metric_col and u_col_types.get(col) == "text":
+                    s_str = combined_df[col].dropna().astype(str).str.lower()
+                    if any(s_str.str.contains(re.escape(t), regex=True, na=False).any() for t in g_tokens if len(t) > 2):
+                        group_col = col
+                        break
+
+        if not group_col:
+            return f"I can't determine the grouping dimension from the spreadsheet because no matching column or categorical field was found for '{raw_phrase}'.", 0
+
+        entity_col = resolve_entity_column(u_headers, u_col_types, question)
+        metric_col = resolve_metric_column(u_headers, u_col_types, question)
+
+        is_count = bool(re.search(r"\b(?:how\s+many|number\s+of|count|is\s+there\s+any)\b", q_norm))
+        is_avg = bool(re.search(r"\b(?:average|avg|mean)\b", q_norm))
+        is_sum = bool(re.search(r"\b(?:total|sum)\b", q_norm))
+        is_ranking = bool(re.search(r"\b(?:highest|lowest|top|bottom|max|min|best|worst|largest|smallest)\b", q_norm))
+
+        match_top = re.search(r"\btop\s+(\d+)\b", q_norm)
+        match_bot = re.search(r"\bbottom\s+(\d+)\b", q_norm)
+        limit = None
+        if match_top:
+            limit = int(match_top.group(1))
+        elif match_bot:
+            limit = int(match_bot.group(1))
+
+        descending = True
+        if re.search(r"\b(?:lowest|smallest|minimum|min|bottom|least|cheapest)\b", q_norm):
+            descending = False
+
+        eval_df = combined_df[combined_df[group_col].notna() & (combined_df[group_col].astype(str).str.strip() != "")].reset_index(drop=True)
+
+        if is_avg or is_sum or (is_ranking and metric_col):
+            if not metric_col or metric_col not in eval_df.columns:
+                return "I can't determine the metric from the spreadsheet.", 0
+
+            eval_df["_numeric_val"] = eval_df[metric_col].apply(parse_numeric_value)
+            eval_df = eval_df.dropna(subset=["_numeric_val"]).reset_index(drop=True)
+
+            if is_avg:
+                grouped = eval_df.groupby(group_col)["_numeric_val"].mean()
+            elif is_sum:
+                grouped = eval_df.groupby(group_col)["_numeric_val"].sum()
+            else:
+                grouped = eval_df.groupby(group_col)["_numeric_val"].mean()
+
+            if is_ranking:
+                grouped = grouped.sort_values(ascending=not descending)
+            if limit:
+                grouped = grouped.head(limit)
+
+            lines = []
+            for idx, (grp_name, val) in enumerate(grouped.items(), 1):
+                if limit and is_ranking:
+                    lines.append(f"{idx}. {grp_name}: {val:.2f}" if is_avg else f"{idx}. {grp_name}: {val:g}")
                 else:
-                    lines = [f"{idx}. {name}: {cnt} companies" for idx, (name, cnt) in enumerate(sorted_sheets[:limit], 1)]
-                    return "\n".join(lines), len(lines)
+                    lines.append(f"{grp_name}: {val:.2f}" if is_avg else f"{grp_name}: {val:g}")
+            return "\n".join(lines), len(lines)
+
+        else: # Default COUNT per group
+            if entity_col and entity_col in eval_df.columns:
+                grouped = eval_df.groupby(group_col)[entity_col].nunique()
+            else:
+                grouped = eval_df.groupby(group_col).size()
+
+            if is_ranking:
+                grouped = grouped.sort_values(ascending=not descending)
+            if limit:
+                grouped = grouped.head(limit)
+
+            lines = []
+            for idx, (grp_name, cnt) in enumerate(grouped.items(), 1):
+                if limit and is_ranking:
+                    lines.append(f"{idx}. {grp_name}: {cnt}")
+                else:
+                    lines.append(f"{grp_name}: {cnt}")
+            return "\n".join(lines), len(lines)
 
     # ------------------------------------------------------------
     # 5. Extract Filter Conditions & Check Grounding (FAIL CLOSED)
