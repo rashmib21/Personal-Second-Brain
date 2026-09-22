@@ -316,7 +316,16 @@ export default function App() {
                       {message.role === "user" ? "You" :
                        message.role === "error" ? "Backend error" : "Second Brain"}
                     </div>
-                    <div className="message-text">{message.text}</div>
+                    <div className="message-text">
+                      {typeof message.text === "string" && message.text.includes("\n")
+                        ? message.text.split("\n").map((line, lineIndex) => (
+                            <React.Fragment key={lineIndex}>
+                              {line}
+                              {lineIndex < message.text.split("\n").length - 1 && <br />}
+                            </React.Fragment>
+                          ))
+                        : message.text}
+                    </div>
 
                     {message.sources?.length > 0 && (
                       <div className="sources">
