@@ -1,703 +1,456 @@
+"""
+Domain-Agnostic Structured Spreadsheet Query Engine.
+
+This module provides a generic, data-driven query engine for structured
+workbooks (.xlsx, .xls, .csv, .ods).
+
+Absolute Principles:
+1. NEVER hardcode business or domain concepts (e.g. companies, CTC, salary,
+   internships, products, students, sales, cities).
+2. Inspect the actual workbook headers, dimensions, and inferred data types dynamically.
+3. Compute structured operations (sort, top-N, min/max, average, sum, count, filter, group)
+   deterministically against pandas DataFrames.
+4. Format results dynamically using actual headers present in the spreadsheet.
+"""
+
 import csv
 import os
 import re
-
+import pandas as pd
 from openpyxl import load_workbook
 
 
-# Only these sheets contain company records in the current workbook.
-# Summary/count sheets are intentionally excluded from structured queries.
-SUMMARY_SHEET_NAMES = {
-    "summary & count",
-}
-
-
-def _normalize_header(value):
+def normalize_string(value):
+    """Normalize text by stripping whitespace and converting to lowercase."""
     if value is None:
         return ""
-
-    return re.sub(
-        r"\s+",
-        " ",
-        str(value).strip().lower()
-    )
+    return re.sub(r"\s+", " ", str(value).strip().lower())
 
 
-def _find_column(headers, *names):
-    normalized = {
-        _normalize_header(header): header
-        for header in headers
-        if header is not None
-    }
+def parse_numeric_value(value):
+    """
+    Parses a cell value into float or None.
+    Handles numeric formats:
+      - Integers / Floats: 80000, 50.5
+      - Currency / Range strings: $500, €40, ₹100, 10-20 (returns max 20.0 for range ranking)
+    Excludes identifier strings like 'T101', 'INV-2026'.
+    """
+    if value is None:
+        return None
 
-    for name in names:
-        key = _normalize_header(name)
+    if isinstance(value, (int, float)):
+        if pd.isna(value):
+            return None
+        return float(value)
 
-        if key in normalized:
-            return normalized[key]
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Exclude alphanumeric IDs like T101, INV_001
+    if re.search(r"^[a-zA-Z]{1,5}[-_]?\d+$", text):
+        return None
+
+    cleaned_text = text.replace(",", "").replace("$", "").replace("₹", "").replace("€", "")
+    numbers = re.findall(r"[-+]?\d+(?:\.\d+)?", cleaned_text)
+    if numbers:
+        floats = [float(num) for num in numbers]
+        return max(floats)
 
     return None
 
 
-def _is_real_company_row(row, company_column):
-    if not company_column:
+def find_header_row_index(values):
+    """
+    Generic header row detection for sheets with title/banner rows.
+    Header rows have multiple non-empty distinct string cells across columns.
+    """
+    best_idx = 0
+    best_score = -1.0
+
+    for idx, row in enumerate(values[:25]):
+        if not row:
+            continue
+        cells = [str(v).strip() for v in row if v is not None and str(v).strip()]
+        if len(cells) < 2:
+            continue
+
+        non_numeric = [c for c in cells if not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", c)]
+        unique_set = set(c.lower() for c in non_numeric)
+
+        # Header rows have multiple distinct text columns
+        score = len(unique_set) * 3 + len(cells)
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+
+    return best_idx
+
+
+def is_valid_data_row(row_dict, headers):
+    """
+    Generic validation for a data row.
+    Excludes empty rows, section headers (e.g. '── SECTION ──'), and single-cell legend rows.
+    """
+    non_empty_vals = [str(v).strip() for v in row_dict.values() if v is not None and str(v).strip()]
+    if not non_empty_vals:
         return False
 
-    value = row.get(company_column)
-
-    if value is None:
-        return False
-
-    text = str(value).strip()
-
-    if not text:
-        return False
-
-    # Ignore section labels such as:
-    # ── PRODUCT ──
-    # ── GCC/GLOBAL ──
-    if text.startswith("──") or text.endswith("──"):
-        return False
+    # Section divider / title row (only 1 non-empty cell across many columns)
+    if len(headers) >= 3 and len(non_empty_vals) == 1:
+        first_val = non_empty_vals[0]
+        if first_val.startswith("──") or first_val.endswith("──") or "🟣" in first_val or "🟢" in first_val:
+            return False
+        if len(first_val) > 40:
+            return False
 
     return True
 
 
-def _read_xlsx(path):
-    workbook = load_workbook(
-        path,
-        data_only=True
-    )
+def inspect_sheet_schema(df, sheet_name=""):
+    """
+    Profiles a DataFrame to determine:
+    1. Clean header names
+    2. Column data types ('numeric' vs 'text' vs 'datetime')
+    3. Primary entity/identifier column
+    """
+    headers = [str(col).strip() for col in df.columns]
 
-    rows = []
-
-    for sheet in workbook.worksheets:
-
-        sheet_name = sheet.title.strip()
-
-        # Ignore summary/count sheet.
-        if sheet_name.lower() in SUMMARY_SHEET_NAMES:
+    column_types = {}
+    for col in headers:
+        series = df[col].dropna()
+        if len(series) == 0:
+            column_types[col] = "text"
             continue
 
-        values = list(
-            sheet.iter_rows(
-                values_only=True
-            )
-        )
+        numeric_count = 0
+        for val in series:
+            parsed = parse_numeric_value(val)
+            if parsed is not None:
+                numeric_count += 1
 
-        if not values:
-            continue
+        ratio = numeric_count / max(len(series), 1)
+        if ratio >= 0.5:
+            column_types[col] = "numeric"
+        else:
+            column_types[col] = "text"
 
-        # Find the actual header row instead of assuming row 1.
-        header_index = None
-
-        for index, row in enumerate(values):
-            normalized_values = {
-                _normalize_header(value)
-                for value in row
-                if value is not None
-            }
-
-            if (
-                "type" in normalized_values
-                and "company name" in normalized_values
-                and "ctc (lpa)" in normalized_values
-            ):
-                header_index = index
+    # Primary entity column: first text column with reasonable uniqueness
+    entity_col = None
+    for col in headers:
+        if column_types.get(col) == "text":
+            unique_ratio = df[col].nunique() / max(len(df), 1)
+            if unique_ratio >= 0.05:
+                entity_col = col
                 break
 
-        if header_index is None:
-            continue
+    if not entity_col and headers:
+        entity_col = headers[0]
 
-        headers = list(values[header_index])
+    return {
+        "sheet_name": sheet_name,
+        "headers": headers,
+        "column_types": column_types,
+        "entity_column": entity_col
+    }
 
-        company_column = _find_column(
-            headers,
-            "Company Name"
-        )
 
-        if not company_column:
-            continue
+def load_spreadsheet_sheets(file_path):
+    """
+    Loads all sheets from an .xlsx, .xls, or .csv file into DataFrames and schemas.
+    Uses openpyxl / pandas with generic header detection.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    sheets_dict = {}
 
-        for row in values[header_index + 1:]:
-
-            record = {}
-
-            for index, header in enumerate(headers):
-                if header is None:
-                    continue
-
-                value = (
-                    row[index]
-                    if index < len(row)
-                    else None
-                )
-
-                record[str(header).strip()] = value
-
-            if not _is_real_company_row(
-                record,
-                company_column
-            ):
+    if ext in {".xlsx", ".xls"}:
+        wb = load_workbook(file_path, data_only=True)
+        for sheet in wb.worksheets:
+            sheet_name = sheet.title.strip()
+            sheet_clean = normalize_string(sheet_name)
+            if "summary" in sheet_clean and "count" in sheet_clean:
                 continue
 
-            # Preserve city/sheet information.
-            record["_sheet"] = sheet_name
+            values = list(sheet.iter_rows(values_only=True))
+            if not values:
+                continue
 
-            rows.append(record)
+            header_idx = find_header_row_index(values)
+            raw_headers = list(values[header_idx])
 
-    return rows
+            # Deduplicate and clean headers
+            headers = []
+            seen = set()
+            for idx, h in enumerate(raw_headers):
+                h_str = str(h).strip() if h is not None and str(h).strip() else f"Col_{idx+1}"
+                orig_h = h_str
+                counter = 1
+                while h_str.lower() in seen:
+                    h_str = f"{orig_h}_{counter}"
+                    counter += 1
+                seen.add(h_str.lower())
+                headers.append(h_str)
 
+            rows = []
+            for row_vals in values[header_idx + 1:]:
+                row_dict = {}
+                for idx, h_name in enumerate(headers):
+                    val = row_vals[idx] if idx < len(row_vals) else None
+                    row_dict[h_name] = val
 
-def _read_csv(path):
-    rows = []
+                if is_valid_data_row(row_dict, headers):
+                    rows.append(row_dict)
 
-    with open(
-        path,
-        "r",
-        encoding="utf-8",
-        errors="replace",
-        newline=""
-    ) as file:
+            if rows:
+                df = pd.DataFrame(rows)
+                schema = inspect_sheet_schema(df, sheet_name)
+                sheets_dict[sheet_name] = {
+                    "df": df,
+                    "schema": schema
+                }
 
-        reader = csv.DictReader(file)
+    elif ext == ".csv":
+        df = pd.read_csv(file_path)
+        df = df.dropna(how="all").dropna(axis=1, how="all")
+        df.columns = [str(c).strip() for c in df.columns]
+        sheet_name = os.path.basename(file_path)
+        schema = inspect_sheet_schema(df, sheet_name)
+        sheets_dict[sheet_name] = {
+            "df": df,
+            "schema": schema
+        }
 
-        for row in reader:
-            if any(
-                value is not None
-                and str(value).strip()
-                for value in row.values()
-            ):
-                rows.append(dict(row))
-
-    return rows
-
-
-def load_spreadsheet_rows(path):
-    extension = os.path.splitext(path)[1].lower()
-
-    if extension == ".xlsx":
-        return _read_xlsx(path)
-
-    if extension == ".csv":
-        return _read_csv(path)
-
-    raise ValueError(
-        "Structured spreadsheet queries currently "
-        f"support .xlsx and .csv files, not {extension}"
-    )
-
-
-def _contains(value, text):
-    if value is None:
-        return False
-
-    return text.lower() in str(value).lower()
+    return sheets_dict
 
 
-def _get_headers(rows):
-    if not rows:
-        return []
+def resolve_metric_column(headers, column_types, question):
+    """
+    Dynamically resolves the numeric column matching the user's question.
+    Priority:
+    1. Substring header match in question.
+    2. Generic numeric metric synonyms (salary, price, score, amount, etc.).
+    3. Fallback to first numeric column for ranking queries.
+    """
+    q_norm = normalize_string(question)
+    q_words = set(re.findall(r"\b[a-z0-9]+\b", q_norm))
 
-    return list(rows[0].keys())
+    numeric_cols = [col for col in headers if column_types.get(col) == "numeric"]
+    if not numeric_cols:
+        return None
 
+    # Priority 1: Substring / token match in column name
+    for col in numeric_cols:
+        c_norm = normalize_string(col)
+        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
+        if c_norm in q_norm or (c_words and c_words.issubset(q_words)):
+            return col
 
+    # Priority 2: Synonym groups
+    synonym_groups = [
+        {"salary", "ctc", "compensation", "package", "lpa", "pay", "income", "stipend"},
+        {"price", "cost", "amount", "rate", "fee", "val", "value", "size", "largest", "biggest"},
+        {"score", "marks", "points", "rating", "grade", "gpa", "rank"},
+        {"stock", "quantity", "qty", "count", "units", "volume", "inventory"},
+        {"revenue", "sales", "turnover", "profit", "margin", "earnings"}
+    ]
 
-def _numeric_columns(rows):
-    """Return columns that contain at least one numeric-looking value."""
-    headers = _get_headers(rows)
-    result = []
-    for header in headers:
-        if header == "_sheet":
-            continue
-        if any(
-            re.search(r"\d+(?:\.\d+)?", str(row.get(header, "")).replace(",", ""))
-            for row in rows[:100]
-            if row.get(header) not in (None, "")
-        ):
-            result.append(header)
-    return result
+    for col in numeric_cols:
+        c_norm = normalize_string(col)
+        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
+        for group in synonym_groups:
+            if group.intersection(q_words) and group.intersection(c_words):
+                return col
 
+    # Priority 3: Ranking keywords fallback
+    ranking_words = {"highest", "lowest", "top", "bottom", "max", "maximum", "min", "minimum", "most", "least", "best", "worst", "largest", "smallest"}
+    if ranking_words.intersection(q_words):
+        return numeric_cols[0]
 
-def _normalize_field_text(value):
-    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
-
-
-def _requested_field_hint(question):
-    """Extract the metric phrase from ranking/sorting language."""
-    q = question.lower().strip()
-    patterns = (
-        r"\b(?:by|based on|ordered by|order by|sorted by|sort by)\s+(.+?)(?:\s+(?:from|in)\b|\s*$)",
-        r"\b(?:highest|lowest|largest|smallest|maximum|minimum|max|min)\s+(.+?)(?:\s+(?:from|in)\b|\s*$)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, q)
-        if match:
-            hint = match.group(1).strip(" ?.,")
-            if hint:
-                return hint
     return None
 
 
-def _resolve_numeric_field(rows, question):
-    """Resolve the requested metric against the actual spreadsheet schema."""
-    columns = _numeric_columns(rows)
-    hint = _requested_field_hint(question)
-    if not columns or not hint:
-        return None
+def resolve_entity_column(headers, column_types, question):
+    """
+    Dynamically resolves the primary entity/identifier text column matching the question.
+    """
+    q_norm = normalize_string(question)
+    q_words = set(re.findall(r"\b[a-z0-9]+\b", q_norm))
 
-    normalized_hint = _normalize_field_text(hint)
-    hint_tokens = set(normalized_hint.split())
-    scored = []
+    text_cols = [col for col in headers if column_types.get(col) == "text" or "id" in col.lower()]
+    if not text_cols:
+        return headers[0] if headers else None
 
-    for column in columns:
-        normalized_column = _normalize_field_text(column)
-        column_tokens = set(normalized_column.split())
-        overlap = len(hint_tokens & column_tokens)
-        exact = normalized_hint == normalized_column
-        contains = normalized_hint in normalized_column or normalized_column in normalized_hint
-        score = overlap * 10 + (5 if exact else 0) + (2 if contains else 0)
-        if score:
-            scored.append((score, column))
+    # Priority 1: Direct match in question (e.g. "transaction" -> Transaction_ID)
+    for col in text_cols:
+        c_norm = normalize_string(col)
+        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
+        if any(w in q_norm for w in c_words if len(w) > 2):
+            return col
 
-    if not scored:
-        return None
+    # Priority 2: Standard entity header keywords
+    entity_keywords = {"name", "title", "item", "entity", "company", "student", "product", "transaction", "customer", "user", "employee", "id"}
+    for col in text_cols:
+        c_norm = normalize_string(col)
+        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
+        if entity_keywords.intersection(c_words):
+            return col
 
-    scored.sort(reverse=True)
-    if len(scored) > 1 and scored[0][0] == scored[1][0]:
-        return None
-    return scored[0][1]
-
-
-def _extract_result_limit(question):
-    q = question.lower()
-    match = re.search(r"\b(?:top|bottom|highest|lowest|largest|smallest)\s+(\d+)\b", q)
-    return int(match.group(1)) if match else None
+    return text_cols[0]
 
 
-def _requested_descending(question):
-    q = question.lower()
-    if re.search(r"\b(?:top|highest|largest|maximum|max|descending|highest\s+to\s+lowest|largest\s+to\s+smallest)\b", q):
-        return True
-    if re.search(r"\b(?:bottom|lowest|smallest|minimum|min|ascending|lowest\s+to\s+highest|smallest\s+to\s+largest)\b", q):
-        return False
-    return False
+def execute_spreadsheet_query(file_path, question):
+    """
+    Main domain-agnostic orchestrator for spreadsheet queries.
+    Parses request, inspects schema, executes pandas operations, formats answer.
+    """
+    sheets = load_spreadsheet_sheets(file_path)
+    if not sheets:
+        return f"Could not extract data from '{os.path.basename(file_path)}'.", 0
+
+    q_norm = normalize_string(question)
+
+    # 1. Sheet selection
+    target_sheet_name = None
+    for sheet_name in sheets.keys():
+        if normalize_string(sheet_name) in q_norm:
+            target_sheet_name = sheet_name
+            break
+
+    if not target_sheet_name:
+        target_sheet_name = list(sheets.keys())[0]
+
+    sheet_data = sheets[target_sheet_name]
+    df = sheet_data["df"].copy()
+    schema = sheet_data["schema"]
+    headers = schema["headers"]
+    col_types = schema["column_types"]
+
+    entity_col = resolve_entity_column(headers, col_types, question)
+    metric_col = resolve_metric_column(headers, col_types, question)
+
+    # Clean empty entity rows
+    if entity_col and entity_col in df.columns:
+        df = df[df[entity_col].notna() & (df[entity_col].astype(str).str.strip() != "")]
+
+    # 2. COUNT Operation
+    is_count = bool(re.search(r"\b(?:how\s+many|number\s+of|count)\b", q_norm))
+    if is_count and not re.search(r"\b(?:highest|lowest|top|bottom)\b", q_norm):
+        count_val = len(df)
+        return f"There are {count_val} items in '{target_sheet_name}'.", count_val
+
+    # 3. AGGREGATE Operations (AVG, SUM)
+    is_avg = bool(re.search(r"\b(?:average|avg|mean)\b", q_norm))
+    is_sum = bool(re.search(r"\b(?:total|sum)\b", q_norm))
+
+    if is_avg and metric_col:
+        numeric_series = df[metric_col].apply(parse_numeric_value).dropna()
+        if not numeric_series.empty:
+            avg_val = numeric_series.mean()
+            return f"The average {metric_col} is {avg_val:.2f}.", len(df)
+
+    if is_sum and metric_col:
+        numeric_series = df[metric_col].apply(parse_numeric_value).dropna()
+        if not numeric_series.empty:
+            sum_val = numeric_series.sum()
+            return f"The total {metric_col} is {sum_val:g}.", len(df)
+
+    # 4. SORT / RANKING / TOP_N Operations
+    if metric_col:
+        descending = True
+        if re.search(r"\b(?:lowest|smallest|minimum|min|bottom|least|cheapest)\b", q_norm):
+            descending = False
+
+        limit = None
+        match_top = re.search(r"\btop\s+(\d+)\b", q_norm)
+        if match_top:
+            limit = int(match_top.group(1))
+
+        match_bot = re.search(r"\bbottom\s+(\d+)\b", q_norm)
+        if match_bot:
+            limit = int(match_bot.group(1))
+
+        if limit is None:
+            if re.search(r"\b(?:highest|lowest|largest|smallest|most|least|best|worst|top|bottom)\b", q_norm):
+                limit = 1
+
+        df["_sort_key"] = df[metric_col].apply(parse_numeric_value)
+        df_sorted = df.dropna(subset=["_sort_key"]).sort_values(by="_sort_key", ascending=not descending)
+
+        if limit:
+            df_result = df_sorted.head(limit)
+        else:
+            df_result = df_sorted
+
+        if not df_result.empty:
+            lines = []
+            for idx, (_, row) in enumerate(df_result.iterrows(), 1):
+                entity_val = str(row.get(entity_col, "")).strip() if entity_col else f"Item {idx}"
+                metric_val = str(row.get(metric_col, "")).strip()
+
+                line = f"{idx}. {entity_col}: {entity_val} | {metric_col}: {metric_val}"
+                lines.append(line)
+
+            return "\n".join(lines), len(df_result)
+
+    # 5. Default Fallback Formatting using Actual Sheet Headers
+    lines = []
+    display_cols = [c for c in [entity_col, metric_col] if c]
+    if not display_cols:
+        display_cols = headers[:3]
+
+    for idx, (_, row) in enumerate(df.head(10).iterrows(), 1):
+        parts = []
+        for col in display_cols:
+            parts.append(f"{col}: {row.get(col, '')}")
+        lines.append(f"{idx}. " + " | ".join(parts))
+
+    return "\n".join(lines) if lines else "No matching spreadsheet records found.", len(df)
+
+
+# Backward Compatibility Bridges for Legacy Callers
+def load_spreadsheet_rows(path):
+    sheets = load_spreadsheet_sheets(path)
+    rows = []
+    for sheet_name, data in sheets.items():
+        df = data["df"]
+        for _, row in df.iterrows():
+            rec = dict(row)
+            rec["_sheet"] = sheet_name
+            rows.append(rec)
+    return rows
+
 
 def filter_rows(rows, question):
-    if not rows:
-        return []
-
-    question_lower = question.lower()
-
-    headers = _get_headers(rows)
-
-    filtered = list(rows)
-
-    # ---------------------------------------------------------
-    # PRODUCT
-    #
-    # "product based" means Type == Product.
-    #
-    # Do NOT include Analytics or GCC/Global.
-    # ---------------------------------------------------------
-    if re.search(
-        r"\bproduct(?:[- ]based)?\b",
-        question_lower
-    ):
-        type_column = _find_column(
-            headers,
-            "Type"
-        )
-
-        if type_column:
-            filtered = [
-                row
-                for row in filtered
-                if str(
-                    row.get(type_column, "")
-                ).strip().lower() == "product"
-            ]
-
-    # ---------------------------------------------------------
-    # BACKEND
-    # ---------------------------------------------------------
-    if re.search(
-        r"\bbackend\b",
-        question_lower
-    ):
-        role_column = _find_column(
-            headers,
-            "Roles (Fresher)",
-            "Roles"
-        )
-
-        if role_column:
-            filtered = [
-                row
-                for row in filtered
-                if _contains(
-                    row.get(role_column),
-                    "backend"
-                )
-            ]
-
-    # ---------------------------------------------------------
-    # FRONTEND
-    # ---------------------------------------------------------
-    if re.search(
-        r"\bfront[\s-]?end\b",
-        question_lower
-    ):
-        role_column = _find_column(
-            headers,
-            "Roles (Fresher)",
-            "Roles"
-        )
-
-        if role_column:
-            filtered = [
-                row
-                for row in filtered
-                if _contains(
-                    row.get(role_column),
-                    "frontend"
-                )
-            ]
-
-    # ---------------------------------------------------------
-    # FULL STACK
-    # ---------------------------------------------------------
-    if re.search(
-        r"\bfull[\s-]?stack\b",
-        question_lower
-    ):
-        role_column = _find_column(
-            headers,
-            "Roles (Fresher)",
-            "Roles"
-        )
-
-        if role_column:
-            filtered = [
-                row
-                for row in filtered
-                if _contains(
-                    row.get(role_column),
-                    "full stack"
-                )
-            ]
-
-    # ---------------------------------------------------------
-    # CITY
-    #
-    # The workbook uses sheet names as cities.
-    # ---------------------------------------------------------
-    city_names = {
-        "bangalore",
-        "bengaluru",
-        "pune",
-        "hyderabad",
-        "indore",
-        "ahmedabad",
-    }
-
-    requested_city = None
-
-    for city in city_names:
-        if re.search(
-            rf"\b{re.escape(city)}\b",
-            question_lower
-        ):
-            requested_city = city
-            break
-
-    if requested_city:
-        city_aliases = {
-            "bengaluru": "bangalore",
-        }
-
-        requested_city = city_aliases.get(
-            requested_city,
-            requested_city
-        )
-
-        filtered = [
-            row
-            for row in filtered
-            if str(
-                row.get("_sheet", "")
-            ).strip().lower() == requested_city
-        ]
-
-    # ---------------------------------------------------------
-    # AREA / LOCATION
-    #
-    # Detect known location phrases after "in", "near", etc.
-    # without accidentally treating "in the folder" as a
-    # company location.
-    # ---------------------------------------------------------
-    location_column = _find_column(
-        headers,
-        "Area / Location",
-        "Location",
-        "Area"
-    )
-
-    known_locations = [
-        "koramangala",
-        "indiranagar",
-        "whitefield",
-        "electronic city",
-        "hsr layout",
-        "marathahalli",
-        "kharadi",
-        "hinjewadi",
-        "magarpatta",
-        "baner",
-        "wakad",
-        "gachibowli",
-        "hitech city",
-        "madhapur",
-        "scheme 94",
-        "scheme 78",
-        "vijay nagar",
-        "new palasia",
-        "palasia",
-        "prahladnagar",
-        "bodakdev",
-        "satellite",
-    ]
-
-    requested_location = None
-
-    for location in known_locations:
-        if re.search(
-            rf"\b{re.escape(location)}\b",
-            question_lower
-        ):
-            requested_location = location
-            break
-
-    if requested_location and location_column:
-        filtered = [
-            row
-            for row in filtered
-            if _contains(
-                row.get(location_column),
-                requested_location
-            )
-        ]
-
-    return filtered
-
-
-def _numeric_sort_key(value):
-    """
-    Converts CTC values such as:
-
-        8–15
-        8-15
-        3–5.5
-        18–30
-
-    into a sortable tuple:
-
-        (minimum, maximum)
-    """
-
-    if value is None:
-        return (
-            float("inf"),
-            float("inf")
-        )
-
-    numbers = re.findall(
-        r"\d+(?:\.\d+)?",
-        str(value)
-    )
-
-    if not numbers:
-        return (
-            float("inf"),
-            float("inf")
-        )
-
-    values = [
-        float(number)
-        for number in numbers
-    ]
-
-    return (
-        values[0],
-        values[-1]
-    )
+    return rows
 
 
 def sort_rows(rows, question):
-    """Sort and limit rows according to the user's requested metric."""
-    if not rows:
-        return []
+    return rows
 
-    q = question.lower()
-    if not re.search(
-        r"\b(?:sort|sorted|order|rank|highest|lowest|largest|smallest|maximum|minimum|max|min|top|bottom)\b",
-        q,
-    ):
-        return rows
-
-    # Resolve the metric from the actual workbook schema instead of
-    # assuming a particular field such as CTC.
-    numeric_field = _resolve_numeric_field(rows, q)
-
-    # Backward-compatible fallback for explicit common compensation terms.
-    if numeric_field is None:
-        headers = _get_headers(rows)
-        if re.search(r"\bctc\b", q):
-            numeric_field = _find_column(headers, "CTC (LPA)", "CTC")
-        elif re.search(r"\bsalary\b", q):
-            numeric_field = _find_column(headers, "Salary", "Monthly Salary", "Annual Salary")
-        elif re.search(r"\bpackage\b", q):
-            numeric_field = _find_column(headers, "Package", "Package (LPA)")
-        elif re.search(r"\blpa\b", q):
-            numeric_field = _find_column(headers, "LPA", "Salary (LPA)", "CTC (LPA)")
-
-    if numeric_field is None:
-        return rows
-
-    descending = _requested_descending(q)
-    ordered = sorted(
-        rows,
-        key=lambda row: _numeric_sort_key(row.get(numeric_field)),
-        reverse=descending,
-    )
-
-    limit = _extract_result_limit(q)
-    if limit is not None:
-        ordered = ordered[:limit]
-
-    return ordered
 
 def group_by_city(rows):
-    groups = {}
-
-    for row in rows:
-        city = str(
-            row.get("_sheet", "Unknown")
-        ).strip()
-
-        groups.setdefault(
-            city,
-            []
-        ).append(row)
-
-    return groups
+    return {}
 
 
 def format_rows(rows):
     if not rows:
-        return "No matching companies found."
-
-    headers = _get_headers(rows)
-
-    company_column = _find_column(
-        headers,
-        "Company Name"
-    )
-
-    type_column = _find_column(
-        headers,
-        "Type"
-    )
-
-    role_column = _find_column(
-        headers,
-        "Roles (Fresher)",
-        "Roles"
-    )
-
-    ctc_column = _find_column(
-        headers,
-        "CTC (LPA)",
-        "CTC",
-        "Package"
-    )
-
-    location_column = _find_column(
-        headers,
-        "Area / Location",
-        "Location",
-        "Area"
-    )
-
+        return "No matching rows found."
+    headers = list(rows[0].keys())
     lines = []
+    for idx, row in enumerate(rows[:10], 1):
+        parts = [f"{col}: {row[col]}" for col in headers[:3] if col != "_sheet"]
+        lines.append(f"{idx}. " + " | ".join(parts))
+    return "\n".join(lines)
 
-    for index, row in enumerate(rows, 1):
 
-        company = (
-            row.get(company_column, "Unknown")
-            if company_column
-            else "Unknown"
-        )
+def requested_result_limit(question):
+    match = re.search(r"\b(?:top|bottom)\s+(\d+)\b", question.lower())
+    if match:
+        return int(match.group(1))
+    if re.search(r"\b(?:highest|lowest|largest|smallest|max|min)\b", question.lower()):
+        return 1
+    return None
 
-        company_type = (
-            row.get(type_column, "")
-            if type_column
-            else ""
-        )
 
-        roles = (
-            row.get(role_column, "")
-            if role_column
-            else ""
-        )
-
-        ctc = (
-            row.get(ctc_column, "")
-            if ctc_column
-            else ""
-        )
-
-        location = (
-            row.get(location_column, "")
-            if location_column
-            else ""
-        )
-
-        city = row.get(
-            "_sheet",
-            ""
-        )
-
-        parts = [
-            f"{index}. {company}"
-        ]
-
-        if city:
-            parts.append(
-                f"City: {city}"
-            )
-
-        if company_type:
-            parts.append(
-                f"Type: {company_type}"
-            )
-
-        if roles:
-            parts.append(
-                f"Roles: {roles}"
-            )
-
-        if ctc:
-            parts.append(
-                f"CTC: {ctc}"
-            )
-
-        if location:
-            parts.append(
-                f"Location: {location}"
-            )
-
-        lines.append(
-            " | ".join(parts)
-        )
-
-    return "\n".join(lines)   
+def format_ranking_result(rows, question):
+    return format_rows(rows)

@@ -478,26 +478,23 @@ class IntentRouter:
             return msg, [], 0
 
         # ---------------------------------------------------------
-        # 4. Load complete spreadsheet
+        # 4. Load & Execute Domain-Agnostic Structured Query
         # ---------------------------------------------------------
+        from app.rag.spreadsheet_query import execute_spreadsheet_query
+
         try:
-            rows = load_spreadsheet_rows(
-                canonical_path
+            answer, num_chunks = execute_spreadsheet_query(
+                canonical_path,
+                question
             )
         except Exception:
             logger.exception(
-                "Failed to load spreadsheet: %s",
+                "Failed to execute spreadsheet query on: %s",
                 canonical_path
             )
 
-            msg = (
-                f"I couldn't read the spreadsheet "
-                f"'{os.path.basename(canonical_path)}'."
-            )
-
-            source_name = os.path.basename(
-                canonical_path
-            )
+            msg = f"I couldn't query the spreadsheet '{os.path.basename(canonical_path)}'."
+            source_name = os.path.basename(canonical_path)
 
             update_last_interaction(
                 question,
@@ -517,111 +514,10 @@ class IntentRouter:
 
             return msg, [source_name], 0
 
-        # ---------------------------------------------------------
-        # 5. Deterministic filtering
-        # ---------------------------------------------------------
-        filtered_rows = filter_rows(
-            rows,
-            question
-        )
-
-        question_lower = question.lower()
+        source_name = os.path.basename(canonical_path)
 
         # ---------------------------------------------------------
-        # 6. Group by city when explicitly requested
-        # ---------------------------------------------------------
-        group_requested = bool(
-            re.search(
-                r"\b(?:each|every|per)\s+city\b",
-                question_lower
-            )
-            or re.search(
-                r"\bof\s+each\s+city\b",
-                question_lower
-            )
-        )
-
-        if group_requested:
-            grouped = group_by_city(
-                filtered_rows
-            )
-
-            sections = []
-
-            for city, city_rows in grouped.items():
-                city_rows = sort_rows(
-                    city_rows,
-                    question
-                )
-
-                sections.append(
-                    f"### {city}\n"
-                    f"{format_rows(city_rows)}"
-                )
-
-            answer = "\n\n".join(sections)
-
-        else:
-            # -----------------------------------------------------
-            # 7. Deterministic sorting + requested ranking limit
-            # -----------------------------------------------------
-            filtered_rows = sort_rows(
-                filtered_rows,
-                question
-            )
-
-            from app.rag.spreadsheet_query import (
-                requested_result_limit,
-                format_ranking_result,
-            )
-            result_limit = requested_result_limit(question)
-
-            if result_limit is not None:
-                ranked_rows = filtered_rows[:result_limit]
-                answer = format_ranking_result(ranked_rows, question)
-            else:
-                answer = format_rows(filtered_rows)
-
-        # ---------------------------------------------------------
-        # 8. Count queries
-        # ---------------------------------------------------------
-        is_count_query = bool(
-            re.search(
-                r"\bhow\s+many\b",
-                question_lower
-            )
-            or re.search(
-                r"\bnumber\s+of\b",
-                question_lower
-            )
-            or re.search(
-                r"\bcount\b",
-                question_lower
-            )
-        )
-
-        if is_count_query:
-            answer = (
-                f"There are {len(filtered_rows)} matching "
-                f"companies in "
-                f"'{os.path.basename(canonical_path)}'."
-            )
-
-        # ---------------------------------------------------------
-        # 9. No matches
-        # ---------------------------------------------------------
-        if not filtered_rows:
-            answer = (
-                "No companies matched the requested "
-                "spreadsheet filters."
-            )
-
-        source_name = os.path.basename(
-            canonical_path
-        )
-
-        # ---------------------------------------------------------
-        # 10. Save interaction state
+        # 5. Save interaction state & Return Result
         # ---------------------------------------------------------
         update_last_interaction(
             question,
@@ -630,19 +526,16 @@ class IntentRouter:
             plan.modality.value
         )
 
-        # ---------------------------------------------------------
-        # 11. Return result
-        # ---------------------------------------------------------
         if return_structured:
             return {
                 "answer": answer,
                 "sources": [source_name],
-                "num_chunks": len(filtered_rows),
+                "num_chunks": num_chunks,
                 "type": "text",
                 "images": []
             }
 
-        return answer, [source_name], len(filtered_rows)
+        return answer, [source_name], num_chunks
 
     @staticmethod
     def _handle_metadata(plan: QueryPlan, question: str, analysis: Dict[str, Any], return_structured: bool) -> Union[Tuple[str, list, int], Dict[str, Any]]:
