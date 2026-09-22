@@ -26,7 +26,11 @@ import pandas as pd
 from openpyxl import load_workbook
 from app.storage.lancedb_store import get_spreadsheet_table
 from app.llm.ollama_client import ask_llama
-from app.services.interaction_state import get_last_interaction
+from app.services.interaction_state import (
+    get_last_interaction,
+    set_spreadsheet_context,
+    get_spreadsheet_context
+)
 
 
 def normalize_string(value):
@@ -412,8 +416,9 @@ def find_applicable_spreadsheets(candidate_paths, question):
 
 def build_runtime_schema_json(sheets):
     """
-    Constructs a JSON-encodable runtime schema representation of all data-bearing sheets.
-    Used for prompting the LLM query planner.
+    Constructs a JSON-encodable runtime schema representation of all data-bearing sheets,
+    including column data types, row counts, and unique categorical values per text column.
+    Used for prompting the LLM query planner and for deterministic grounding validation.
     """
     schema_summary = []
     for sheet_name, data in sheets.items():
@@ -422,41 +427,53 @@ def build_runtime_schema_json(sheets):
         headers = schema["headers"]
         col_types = schema["column_types"]
 
-        sample_vals = {}
+        categorical_values = {}
         for col in headers:
             if col in df.columns:
-                unique_samples = df[col].dropna().unique()[:3].tolist()
-                sample_vals[col] = [str(v) for v in unique_samples]
+                if col_types.get(col) == "text":
+                    unique_vals = df[col].dropna().unique()[:50].tolist()
+                    categorical_values[col] = [str(v) for v in unique_vals if str(v).strip()]
+                else:
+                    valid_nums = df[col].apply(parse_numeric_value).dropna()
+                    if not valid_nums.empty:
+                        categorical_values[col] = {
+                            "min": float(valid_nums.min()),
+                            "max": float(valid_nums.max()),
+                            "sample": [float(v) for v in valid_nums.unique()[:5]]
+                        }
 
         schema_summary.append({
             "sheet_name": sheet_name,
             "headers": headers,
             "column_types": col_types,
             "row_count": len(df),
-            "sample_values": sample_vals
+            "categorical_values": categorical_values
         })
 
     return json.dumps(schema_summary, indent=2)
 
 
-def generate_structured_query_plan(question, sheets, conversation_history=""):
+def generate_structured_query_plan(question, sheets, conversation_history="", structured_context=None):
     """
     Uses Ollama / LLM to convert natural human language and conversational history
-    into a structured JSON Query Plan grounded in the actual runtime schema.
+    into a structured JSON Query Plan grounded strictly in the actual runtime schema.
     """
     schema_json = build_runtime_schema_json(sheets)
+    context_str = json.dumps(structured_context or {}, indent=2)
 
     prompt = f"""You are a Natural Language to Structured Query Plan parser for spreadsheets.
 
 USER QUESTION: "{question}"
 CONVERSATIONAL HISTORY: "{conversation_history}"
+STRUCTURED INTERACTION CONTEXT:
+{context_str}
 
-ACTUAL RUNTIME SPREADSHEET SCHEMA:
+ACTUAL RUNTIME SPREADSHEET SCHEMA & DATA VALUES:
 {schema_json}
 
 Convert the user's question into a JSON object matching this EXACT schema:
 {{
-  "operation": "LIST" | "COUNT" | "GROUP_BY" | "RANKING" | "METADATA" | "UNGROUNDED",
+  "operation": "LIST" | "COUNT" | "GROUP_BY" | "RANKING" | "AGGREGATE" | "UNGROUNDED",
   "target_sheet": "<exact_sheet_name_from_schema_or_null>",
   "entity_column": "<exact_column_name_to_display_or_null>",
   "metric_column": "<exact_numeric_column_name_or_null>",
@@ -475,11 +492,10 @@ Convert the user's question into a JSON object matching this EXACT schema:
 }}
 
 RULES:
-1. Ground target_sheet, entity_column, metric_column, filters, and group_by_column in the actual schema headers and sheet names.
-2. If the user asks for a filter concept that DOES NOT exist in any column header or sample value (e.g. "service based"), set operation="UNGROUNDED" and ungrounded_reason="Could not find column or value representing 'service based' in the workbook."
-3. If user asks "list companies of Indore", set operation="LIST", target_sheet="Indore", limit=null.
-4. If user asks "how many companies in Indore?", set operation="COUNT", target_sheet="Indore", aggregation="DISTINCT_COUNT".
-5. Return ONLY valid JSON.
+1. Ground target_sheet, entity_column, metric_column, filters, and group_by_column strictly in the actual schema headers, sheet names, and categorical data values.
+2. If the user query contains a filter term or concept that DOES NOT exist in any sheet name, column header, or categorical data value in the runtime schema, set operation="UNGROUNDED" and set ungrounded_reason to a description of the missing term.
+3. If the user query is a follow-up or incomplete request, inherit target_sheet, entity_column, and filters from the STRUCTURED INTERACTION CONTEXT.
+4. Return ONLY valid JSON.
 """
 
     sys_instruction = "You are a precise JSON query plan parser for spreadsheets. Output valid JSON only."
@@ -510,9 +526,15 @@ def execute_spreadsheet_query(file_path, question):
     q_norm = normalize_string(question)
     last_interaction = get_last_interaction()
     conv_history = last_interaction.get("question", "") if last_interaction else ""
+    struct_ctx = get_spreadsheet_context()
 
     # Generate LLM Query Plan
-    llm_plan = generate_structured_query_plan(question, sheets, conversation_history=conv_history)
+    llm_plan = generate_structured_query_plan(
+        question,
+        sheets,
+        conversation_history=conv_history,
+        structured_context=struct_ctx
+    )
 
     # Fail closed if LLM query plan determined ungrounded concept
     if llm_plan and llm_plan.get("operation") == "UNGROUNDED":
