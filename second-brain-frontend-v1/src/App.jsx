@@ -36,7 +36,6 @@ export default function App() {
   const [view, setView] = useState("global");
   const [selectedSource, setSelectedSource] = useState(null);
   const [query, setQuery] = useState("");
-  const [messages, setMessages] = useState([]);
   const [items, setItems] = useState([]);
   const [inventoryError, setInventoryError] = useState("");
   const [loadingInventory, setLoadingInventory] = useState(false);
