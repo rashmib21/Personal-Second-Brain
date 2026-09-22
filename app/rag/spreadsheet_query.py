@@ -18,6 +18,8 @@ import os
 import re
 import pandas as pd
 from openpyxl import load_workbook
+import json
+from app.storage.lancedb_store import get_spreadsheet_table
 
 
 def normalize_string(value):
@@ -281,7 +283,22 @@ def resolve_entity_column(headers, column_types, question):
     if not text_cols:
         return headers[0] if headers else None
 
-    primary_entity_keywords = {"name", "title", "company", "student", "product", "item", "employee", "customer", "user", "transaction"}
+    primary_entity_keywords = {
+        "name",
+        "title",
+        "product",
+        "item",
+        "employee",
+        "customer",
+        "student",
+        "user",
+        "person",
+        "company",
+        "organization",
+        "vendor",
+        "client",
+        "account",
+    }
 
     # Priority 1: Primary entity header matching primary_entity_keywords
     for col in text_cols:
@@ -299,7 +316,86 @@ def resolve_entity_column(headers, column_types, question):
 
     return text_cols[0]
 
+def load_structured_spreadsheet_from_lancedb(file_path=None):
+    """
+    Loads structured spreadsheet rows from LanceDB and converts them
+    into the same DataFrame-based representation used by the query engine.
 
+    file_path:
+        None -> all spreadsheet rows
+        specific path -> only that spreadsheet
+    """
+
+    table = get_spreadsheet_table()
+
+    if table is None or table.count_rows() == 0:
+        return {}
+
+    rows = table.search().limit(100000).to_list()
+
+    if file_path:
+        target = os.path.abspath(str(file_path)).lower()
+        target_name = os.path.basename(target).lower()
+
+        rows = [
+            row for row in rows
+            if (
+                os.path.abspath(str(row.get("source_path", ""))).lower() == target
+                or str(row.get("source_file", "")).lower() == target_name
+            )
+        ]
+
+    if not rows:
+        return {}
+
+    grouped = {}
+
+    for row in rows:
+        try:
+            row_data = json.loads(row.get("row_data", "{}"))
+        except Exception:
+            row_data = {}
+
+        sheet_name = row.get("sheet_name", "Sheet1")
+
+        if sheet_name not in grouped:
+            grouped[sheet_name] = []
+
+        grouped[sheet_name].append({
+            **row_data,
+            "_sheet": sheet_name,
+            "_row_number": row.get("row_number"),
+            "_source_file": row.get("source_file"),
+            "_source_path": row.get("source_path"),
+        })
+
+    result = {}
+
+    for sheet_name, records in grouped.items():
+        if not records:
+            continue
+
+        df = pd.DataFrame(records)
+
+        # Remove internal columns from actual spreadsheet schema
+        data_headers = [
+            c for c in df.columns
+            if not str(c).startswith("_")
+        ]
+
+        data_df = df[data_headers].copy()
+
+        schema = inspect_sheet_schema(
+            data_df,
+            sheet_name
+        )
+
+        result[sheet_name] = {
+            "df": data_df,
+            "schema": schema,
+        }
+
+    return result
 def execute_spreadsheet_query(file_path, question):
     """
     Main domain-agnostic orchestrator for spreadsheet queries.
@@ -307,7 +403,7 @@ def execute_spreadsheet_query(file_path, question):
     validates grounding (fails closed if ungrounded), executes pandas logic,
     and returns grounded results.
     """
-    sheets = load_spreadsheet_sheets(file_path)
+    sheets = load_structured_spreadsheet_from_lancedb(file_path)
     if not sheets:
         return f"Could not extract data from '{os.path.basename(file_path)}'.", 0
 
@@ -325,7 +421,8 @@ def execute_spreadsheet_query(file_path, question):
                 break
 
     if not target_sheet_name:
-        target_sheet_name = list(sheets.keys())[0]
+        non_summary = [s for s in sheets.keys() if "summary" not in normalize_string(s)]
+        target_sheet_name = non_summary[0] if non_summary else list(sheets.keys())[0]
 
     sheet_data = sheets[target_sheet_name]
     df = sheet_data["df"].copy()
@@ -395,7 +492,8 @@ def execute_spreadsheet_query(file_path, question):
         "different", "show", "list", "give", "provide", "display", "find", "filter", "sort", "order",
         "rank", "highest", "lowest", "top", "bottom", "all", "count", "number", "hiring", "hired",
         "company", "companies", "student", "students", "product", "products", "item", "items",
-        "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below"
+        "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
+        "roles", "role", "skills", "skill", "city", "cities", "each", "their"
     }
 
     candidate_phrases = []
@@ -422,19 +520,27 @@ def execute_spreadsheet_query(file_path, question):
         if header_matched:
             continue
 
+        p_tokens = [t for t in phrase.split() if t not in stopwords and len(t) > 2]
+        if not p_tokens:
+            continue
+
         found_cell_match = False
-        for col in headers:
-            if col_types.get(col) == "text":
-                series_str = df[col].dropna().astype(str).str.lower()
-                matches = series_str[series_str.str.contains(phrase, regex=False)]
-                if not matches.empty:
-                    found_cell_match = True
-                    matched_columns_and_vals.append((col, phrase))
-                    break
+        for token in p_tokens:
+            token_header_match = any(token in normalize_string(h) for h in headers)
+            if token_header_match:
+                found_cell_match = True
+
+            for col in headers:
+                if col_types.get(col) == "text":
+                    series_str = df[col].dropna().astype(str).str.lower()
+                    matches = series_str[series_str.str.contains(re.escape(token), regex=True, na=False)]
+                    if not matches.empty:
+                        found_cell_match = True
+                        if (col, token) not in matched_columns_and_vals and not token_header_match:
+                            matched_columns_and_vals.append((col, token))
 
         if not found_cell_match:
-            if phrase in {"service based", "service-based", "product based", "product-based", "data engineer", "backend"}:
-                ungrounded_phrases.append(phrase)
+            ungrounded_phrases.append(phrase)
 
     if ungrounded_phrases:
         missing_term = ungrounded_phrases[0]
@@ -442,9 +548,8 @@ def execute_spreadsheet_query(file_path, question):
 
     for col, val_str in matched_columns_and_vals:
         if col in filtered_df.columns:
-            filtered_df = filtered_df[
-                filtered_df[col].dropna().astype(str).str.lower().str.contains(val_str, regex=False)
-            ]
+            mask = filtered_df[col].astype(str).str.lower().str.contains(re.escape(val_str), regex=True, na=False)
+            filtered_df = filtered_df[mask].reset_index(drop=True)
 
     if metric_col and metric_col in filtered_df.columns:
         filtered_df["_numeric_val"] = filtered_df[metric_col].apply(parse_numeric_value)
