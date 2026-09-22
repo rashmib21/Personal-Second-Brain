@@ -100,8 +100,16 @@ def chat_endpoint():
     """
     payload = request.get_json(silent=True) or {}
     question_text = payload.get("question", "").strip()
-    active_file = payload.get("active_file") or payload.get("file") or payload.get("activeFile")
-    modality = payload.get("modality")
+    active_file = (
+        payload.get("active_file")
+        or payload.get("source")
+        or payload.get("file")
+        or payload.get("activeFile")
+    )
+    modality = (
+        payload.get("modality")
+        or payload.get("scope")
+    )
     if not question_text:
         return jsonify({"detail": "Question cannot be empty."}), 400
 
