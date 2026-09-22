@@ -1,16 +1,21 @@
 """
-Domain-Agnostic Structured Spreadsheet Query Engine.
+Domain-Agnostic Structured Spreadsheet Query Engine with LLM Query Planning.
 
 This module provides a generic, data-driven query engine for structured
 workbooks (.xlsx, .xls, .csv, .ods).
 
+Architecture Flow:
+1. User Query + Conversational History
+2. Runtime Schema Grounding (extract sheets, columns, types, sample values, row counts)
+3. Structured Query Plan Generation (LLM converts NL to machine-readable JSON plan)
+4. Schema & Value Validation (validate fields/values against actual runtime data, fail closed if ungrounded)
+5. Deterministic Pandas/LanceDB Execution (execute filtering, sorting, group-by, aggregation, distinct count)
+6. Result Completeness Verification (format complete results without silent line limits)
+
 Absolute Principles:
-1. NEVER hardcode business or domain concepts (e.g. companies, CTC, salary,
-   internships, products, students, sales, cities, roles, employees).
-2. Inspect the actual workbook headers, dimensions, and inferred data types dynamically at runtime.
-3. Compute structured operations (sort, top-N, min/max, average, sum, count, filter, group)
-   deterministically against pandas DataFrames.
-4. Format results dynamically using actual headers present in the spreadsheet.
+- NEVER hardcode business or domain concepts (e.g. companies, CTC, salary, products, students, cities, roles).
+- Execution layer is strictly deterministic.
+- Truncation to 10 rows is strictly forbidden unless explicitly requested by user (e.g. "top 5").
 """
 
 import csv
@@ -20,6 +25,8 @@ import json
 import pandas as pd
 from openpyxl import load_workbook
 from app.storage.lancedb_store import get_spreadsheet_table
+from app.llm.ollama_client import ask_llama
+from app.services.interaction_state import get_last_interaction
 
 
 def normalize_string(value):
@@ -115,7 +122,7 @@ def inspect_sheet_schema(df, sheet_name=""):
     """
     Profiles a DataFrame dynamically to determine:
     1. Clean header names
-    2. Column data types ('numeric' vs 'text' vs 'boolean' vs 'datetime')
+    2. Column data types ('numeric' vs 'text')
     3. Primary entity/identifier column based on statistical uniqueness distribution
     """
     headers = [str(col).strip() for col in df.columns]
@@ -169,7 +176,6 @@ def is_summary_sheet(sheet_name, df):
     Detects summary/legend/instruction sheets based on structural characteristics:
       - Low row count (< 2 rows)
       - Low data cell density (< 25% non-empty cells)
-      - Title/summary in sheet name combined with single column layout
     """
     name_norm = normalize_string(sheet_name)
     words = set(re.findall(r"\b[a-z0-9]+\b", name_norm))
@@ -404,79 +410,97 @@ def find_applicable_spreadsheets(candidate_paths, question):
     return candidate_paths
 
 
-def resolve_metric_column(headers, column_types, question):
+def build_runtime_schema_json(sheets):
     """
-    Dynamically resolves the numeric metric column matching the user's question
-    without hardcoded domain dictionaries.
+    Constructs a JSON-encodable runtime schema representation of all data-bearing sheets.
+    Used for prompting the LLM query planner.
     """
-    q_norm = normalize_string(question)
-    q_words = set(re.findall(r"\b[a-z0-9]+\b", q_norm))
+    schema_summary = []
+    for sheet_name, data in sheets.items():
+        df = data["df"]
+        schema = data["schema"]
+        headers = schema["headers"]
+        col_types = schema["column_types"]
 
-    numeric_cols = [col for col in headers if column_types.get(col) == "numeric"]
-    if not numeric_cols:
-        return None
+        sample_vals = {}
+        for col in headers:
+            if col in df.columns:
+                unique_samples = df[col].dropna().unique()[:3].tolist()
+                sample_vals[col] = [str(v) for v in unique_samples]
 
-    # Priority 1: Match numeric column name or tokens in question
-    for col in numeric_cols:
-        c_norm = normalize_string(col)
-        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
-        if c_norm in q_norm or (c_words and c_words.issubset(q_words)):
-            return col
+        schema_summary.append({
+            "sheet_name": sheet_name,
+            "headers": headers,
+            "column_types": col_types,
+            "row_count": len(df),
+            "sample_values": sample_vals
+        })
 
-    # Priority 2: Check if any token in column name appears in question
-    for col in numeric_cols:
-        c_norm = normalize_string(col)
-        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
-        if any(w in q_words for w in c_words if len(w) > 2):
-            return col
-
-    # Priority 3: Fallback to first numeric column for ranking queries
-    ranking_words = {"highest", "lowest", "top", "bottom", "max", "maximum", "min", "minimum", "most", "least", "best", "worst", "largest", "smallest", "above", "below", "over", "under", "greater", "less", "more"}
-    if ranking_words.intersection(q_words):
-        return numeric_cols[0]
-
-    return numeric_cols[0] if len(numeric_cols) == 1 else None
+    return json.dumps(schema_summary, indent=2)
 
 
-def resolve_entity_column(headers, column_types, question, df=None):
+def generate_structured_query_plan(question, sheets, conversation_history=""):
     """
-    Dynamically resolves the primary entity/identifier text column matching the question
-    without hardcoded domain dictionaries.
+    Uses Ollama / LLM to convert natural human language and conversational history
+    into a structured JSON Query Plan grounded in the actual runtime schema.
     """
-    q_norm = normalize_string(question)
-    text_cols = [col for col in headers if column_types.get(col) == "text"]
+    schema_json = build_runtime_schema_json(sheets)
 
-    if not text_cols:
-        return headers[0] if headers else None
+    prompt = f"""You are a Natural Language to Structured Query Plan parser for spreadsheets.
 
-    # Priority 1: User explicitly mentioned column name in question
-    for col in text_cols:
-        c_norm = normalize_string(col)
-        c_words = set(re.findall(r"\b[a-z0-9]+\b", c_norm))
-        if any(w in q_norm for w in c_words if len(w) > 2):
-            return col
+USER QUESTION: "{question}"
+CONVERSATIONAL HISTORY: "{conversation_history}"
 
-    # Priority 2: Highest uniqueness ratio in DataFrame
-    if df is not None:
-        best_col = text_cols[0]
-        best_ratio = -1.0
-        for col in text_cols:
-            non_nulls = df[col].dropna()
-            if len(non_nulls) > 0:
-                ratio = non_nulls.nunique() / len(non_nulls)
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_col = col
-        return best_col
+ACTUAL RUNTIME SPREADSHEET SCHEMA:
+{schema_json}
 
-    return text_cols[0]
+Convert the user's question into a JSON object matching this EXACT schema:
+{{
+  "operation": "LIST" | "COUNT" | "GROUP_BY" | "RANKING" | "METADATA" | "UNGROUNDED",
+  "target_sheet": "<exact_sheet_name_from_schema_or_null>",
+  "entity_column": "<exact_column_name_to_display_or_null>",
+  "metric_column": "<exact_numeric_column_name_or_null>",
+  "filters": [
+    {{
+      "column": "<exact_column_name>",
+      "operator": "EQUALS" | "CONTAINS" | "GREATER_THAN" | "LESS_THAN" | "BETWEEN",
+      "value": "<value_or_threshold>"
+    }}
+  ],
+  "group_by_column": "<exact_column_name_or_sheet_name_or_null>",
+  "aggregation": "COUNT" | "AVG" | "SUM" | "MIN" | "MAX" | "DISTINCT_COUNT" | "NONE",
+  "sort_direction": "ASC" | "DESC" | "NONE",
+  "limit": <number_or_null>,
+  "ungrounded_reason": "<string_explaining_missing_column_or_value_or_null>"
+}}
+
+RULES:
+1. Ground target_sheet, entity_column, metric_column, filters, and group_by_column in the actual schema headers and sheet names.
+2. If the user asks for a filter concept that DOES NOT exist in any column header or sample value (e.g. "service based"), set operation="UNGROUNDED" and ungrounded_reason="Could not find column or value representing 'service based' in the workbook."
+3. If user asks "list companies of Indore", set operation="LIST", target_sheet="Indore", limit=null.
+4. If user asks "how many companies in Indore?", set operation="COUNT", target_sheet="Indore", aggregation="DISTINCT_COUNT".
+5. Return ONLY valid JSON.
+"""
+
+    sys_instruction = "You are a precise JSON query plan parser for spreadsheets. Output valid JSON only."
+
+    try:
+        raw_response = ask_llama(prompt, system_instruction=sys_instruction)
+        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        if json_match:
+            plan = json.loads(json_match.group(0))
+            return plan
+    except Exception:
+        pass
+
+    return None
 
 
 def execute_spreadsheet_query(file_path, question):
     """
     Main domain-agnostic orchestrator for structured spreadsheet queries.
-    Inspects workbook schema, extracts filter conditions dynamically,
-    validates grounding (fails closed if ungrounded), executes pandas logic,
+    Provides runtime schema to LLM to generate structured query plan,
+    validates the plan deterministically, executes pandas operations,
     and returns complete grounded results.
     """
     sheets = load_structured_spreadsheet_from_lancedb(file_path)
@@ -484,22 +508,33 @@ def execute_spreadsheet_query(file_path, question):
         return f"Could not extract data from '{os.path.basename(file_path)}'.", 0
 
     q_norm = normalize_string(question)
+    last_interaction = get_last_interaction()
+    conv_history = last_interaction.get("question", "") if last_interaction else ""
 
-    # ------------------------------------------------------------
-    # 1. Dynamic Sheet Selection
-    # ------------------------------------------------------------
+    # Generate LLM Query Plan
+    llm_plan = generate_structured_query_plan(question, sheets, conversation_history=conv_history)
+
+    # Fail closed if LLM query plan determined ungrounded concept
+    if llm_plan and llm_plan.get("operation") == "UNGROUNDED":
+        reason = llm_plan.get("ungrounded_reason") or f"unsupported filter in '{question}'"
+        return f"I can't determine that from this spreadsheet because {reason}.", 0
+
+    # Dynamic Sheet Selection fallback
     target_sheet_name = None
-    for sheet_name in sheets.keys():
-        s_norm = normalize_string(sheet_name)
-        # Use word boundary matching to avoid naive substring matching
-        sheet_tokens = [w for w in s_norm.split() if len(w) > 1]
-        for token in sheet_tokens:
-            pattern = r"\b" + re.escape(token) + r"\b"
-            if re.search(pattern, q_norm):
-                target_sheet_name = sheet_name
+    if llm_plan and llm_plan.get("target_sheet") in sheets:
+        target_sheet_name = llm_plan.get("target_sheet")
+
+    if not target_sheet_name:
+        for sheet_name in sheets.keys():
+            s_norm = normalize_string(sheet_name)
+            sheet_tokens = [w for w in s_norm.split() if len(w) > 1]
+            for token in sheet_tokens:
+                pattern = r"\b" + re.escape(token) + r"\b"
+                if re.search(pattern, q_norm):
+                    target_sheet_name = sheet_name
+                    break
+            if target_sheet_name:
                 break
-        if target_sheet_name:
-            break
 
     if not target_sheet_name:
         target_sheet_name = list(sheets.keys())[0]
@@ -510,40 +545,50 @@ def execute_spreadsheet_query(file_path, question):
     headers = schema["headers"]
     col_types = schema["column_types"]
 
-    # ------------------------------------------------------------
-    # 2. Schema Inspection Queries
-    # ------------------------------------------------------------
-    if re.search(r"\b(?:what\s+columns|available\s+columns|headers|column\s+names)\b", q_norm):
-        header_str = ", ".join(headers)
-        return f"The available columns in '{target_sheet_name}' are: {header_str}.", len(headers)
+    # Dynamic Column Resolution
+    entity_col = None
+    if llm_plan and llm_plan.get("entity_column") in headers:
+        entity_col = llm_plan.get("entity_column")
+    if not entity_col:
+        best_ratio = -1.0
+        for col in headers:
+            if col_types.get(col) == "text":
+                non_nulls = df[col].dropna()
+                if len(non_nulls) > 0:
+                    ratio = non_nulls.nunique() / len(non_nulls)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        entity_col = col
+    if not entity_col:
+        entity_col = headers[0]
 
-    if re.search(r"\b(?:first|head)\s+(\d+)\s+rows\b", q_norm):
-        m = re.search(r"\b(?:first|head)\s+(\d+)\s+rows\b", q_norm)
-        num_rows = int(m.group(1)) if m else 5
-        lines = []
-        for idx, (_, row) in enumerate(df.head(num_rows).iterrows(), 1):
-            parts = [f"{c}: {row[c]}" for c in headers[:4] if pd.notna(row[c])]
-            lines.append(f"{idx}. " + " | ".join(parts))
-        return "\n".join(lines), min(num_rows, len(df))
-
-    # ------------------------------------------------------------
-    # 3. Dynamic Column Resolution
-    # ------------------------------------------------------------
-    entity_col = resolve_entity_column(headers, col_types, question, df=df)
-    metric_col = resolve_metric_column(headers, col_types, question)
+    metric_col = None
+    if llm_plan and llm_plan.get("metric_column") in headers:
+        metric_col = llm_plan.get("metric_column")
+    if not metric_col:
+        numeric_cols = [c for c in headers if col_types.get(c) == "numeric"]
+        if numeric_cols:
+            for c in numeric_cols:
+                c_norm = normalize_string(c)
+                if any(w in q_norm for w in c_norm.split() if len(w) > 2):
+                    metric_col = c
+                    break
+            if not metric_col:
+                metric_col = numeric_cols[0]
 
     if entity_col and entity_col in df.columns:
         df = df[df[entity_col].notna() & (df[entity_col].astype(str).str.strip() != "")].reset_index(drop=True)
 
     # ------------------------------------------------------------
-    # 4. GENERALIZED GROUP BY / AGGREGATION ENGINE
+    # GROUP BY / AGGREGATION ENGINE
     # ------------------------------------------------------------
     group_phrase_match = re.search(
         r"\b(?:in\s+each|per|by|for\s+each|grouped?\s+by)\s+([a-z0-9\s/_\-]+)",
         q_norm
     )
+    is_group_op = (llm_plan and llm_plan.get("operation") == "GROUP_BY") or bool(group_phrase_match)
 
-    if group_phrase_match:
+    if is_group_op:
         combined_list = []
         for s_name, d in sheets.items():
             s_df = d["df"].copy()
@@ -552,25 +597,22 @@ def execute_spreadsheet_query(file_path, question):
 
         combined_df = pd.concat(combined_list, ignore_index=True).reset_index(drop=True)
         u_headers = [c for c in combined_df.columns if not str(c).startswith("_")]
-        u_schema = inspect_sheet_schema(combined_df[u_headers], "combined") if u_headers else {}
-        u_col_types = u_schema.get("column_types", {})
-
-        raw_phrase = group_phrase_match.group(1).strip()
-        g_tokens = [w for w in raw_phrase.split() if len(w) > 2]
 
         group_col = None
+        if llm_plan and llm_plan.get("group_by_column"):
+            grp = llm_plan.get("group_by_column")
+            if grp in u_headers or grp == "_sheet_name":
+                group_col = grp
 
-        # Check matching header
-        for col in u_headers:
-            c_norm = normalize_string(col)
-            if any(re.search(r"\b" + re.escape(t) + r"\b", c_norm) for t in g_tokens):
-                group_col = col
-                break
-
-        # Check sheet names dimension
-        if not group_col and len(sheets) > 1:
-            sheet_categories = [normalize_string(s) for s in sheets.keys()]
-            if any(any(t in sc for t in g_tokens) for sc in sheet_categories):
+        if not group_col and group_phrase_match:
+            raw_phrase = group_phrase_match.group(1).strip()
+            g_tokens = [w for w in raw_phrase.split() if len(w) > 2]
+            for col in u_headers:
+                c_norm = normalize_string(col)
+                if any(re.search(r"\b" + re.escape(t) + r"\b", c_norm) for t in g_tokens):
+                    group_col = col
+                    break
+            if not group_col and len(sheets) > 1:
                 group_col = "_sheet_name"
 
         if not group_col:
@@ -583,16 +625,9 @@ def execute_spreadsheet_query(file_path, question):
         is_ranking = bool(re.search(r"\b(?:highest|lowest|top|bottom|max|min|best|worst|largest|smallest)\b", q_norm))
 
         match_top = re.search(r"\btop\s+(\d+)\b", q_norm)
-        match_bot = re.search(r"\bbottom\s+(\d+)\b", q_norm)
-        limit = None
-        if match_top:
-            limit = int(match_top.group(1))
-        elif match_bot:
-            limit = int(match_bot.group(1))
+        limit = int(match_top.group(1)) if match_top else None
 
-        descending = True
-        if re.search(r"\b(?:lowest|smallest|minimum|min|bottom|least|cheapest)\b", q_norm):
-            descending = False
+        descending = not bool(re.search(r"\b(?:lowest|smallest|minimum|min|bottom|least|cheapest)\b", q_norm))
 
         if is_avg or is_sum or (is_ranking and metric_col):
             eval_df["_numeric_val"] = eval_df[metric_col].apply(parse_numeric_value)
@@ -632,12 +667,11 @@ def execute_spreadsheet_query(file_path, question):
             return "\n".join(lines), len(lines)
 
     # ------------------------------------------------------------
-    # 5. Extract Filter Conditions & Check Grounding (FAIL CLOSED)
+    # FILTER CONDITIONS & GROUNDING (FAIL CLOSED)
     # ------------------------------------------------------------
     filtered_df = df.copy()
     ungrounded_phrases = []
 
-    # Strip filename and stem from query text to prevent filename tokens from becoming filter terms
     q_filter_text = q_norm
     if file_path:
         fname = os.path.basename(file_path).lower()
@@ -717,6 +751,21 @@ def execute_spreadsheet_query(file_path, question):
             mask = mask.reindex(filtered_df.index, fill_value=False)
             filtered_df = filtered_df[mask].reset_index(drop=True)
 
+    # Apply LLM plan filters if available
+    if llm_plan and llm_plan.get("filters"):
+        for f_item in llm_plan.get("filters"):
+            f_col = f_item.get("column")
+            f_op = f_item.get("operator")
+            f_val = f_item.get("value")
+            if f_col in filtered_df.columns and f_val is not None:
+                val_clean = str(f_val).lower().strip()
+                if target_sheet_name and val_clean == target_sheet_name.lower():
+                    continue
+                if f_op in ("EQUALS", "CONTAINS"):
+                    mask = filtered_df[f_col].astype(str).str.lower().str.contains(re.escape(val_clean), regex=True, na=False)
+                    mask = mask.reindex(filtered_df.index, fill_value=False)
+                    filtered_df = filtered_df[mask].reset_index(drop=True)
+
     # Numeric threshold comparison filter
     if metric_col and metric_col in filtered_df.columns:
         filtered_df["_numeric_val"] = filtered_df[metric_col].apply(parse_numeric_value)
@@ -728,10 +777,10 @@ def execute_spreadsheet_query(file_path, question):
     # ------------------------------------------------------------
     # 6. Structured Operations Execution (COUNT, AVG, SUM, SORT, LIST)
     # ------------------------------------------------------------
-    is_count = bool(re.search(r"\b(?:how\s+many|number\s+of|count|is\s+there\s+any)\b", q_norm))
+    is_count = (llm_plan and llm_plan.get("operation") == "COUNT") or bool(re.search(r"\b(?:how\s+many|number\s+of|count|is\s+there\s+any)\b", q_norm))
     is_avg = bool(re.search(r"\b(?:average|avg|mean)\b", q_norm))
     is_sum = bool(re.search(r"\b(?:total|sum)\b", q_norm))
-    is_ranking = bool(re.search(r"\b(?:highest|lowest|top|bottom|max|min|best|worst|largest|smallest)\b", q_norm))
+    is_ranking = (llm_plan and llm_plan.get("operation") == "RANKING") or bool(re.search(r"\b(?:highest|lowest|top|bottom|max|min|best|worst|largest|smallest)\b", q_norm))
 
     if is_count and not is_ranking and not is_avg and not is_sum:
         if entity_col and entity_col in filtered_df.columns:
@@ -766,9 +815,8 @@ def execute_spreadsheet_query(file_path, question):
         if match_top:
             limit = int(match_top.group(1))
 
-        match_bot = re.search(r"\bbottom\s+(\d+)\b", q_norm)
-        if match_bot:
-            limit = int(match_bot.group(1))
+        if not limit and llm_plan and llm_plan.get("limit"):
+            limit = llm_plan.get("limit")
 
         if "_numeric_val" not in filtered_df.columns:
             filtered_df["_numeric_val"] = filtered_df[metric_col].apply(parse_numeric_value)
@@ -798,6 +846,8 @@ def execute_spreadsheet_query(file_path, question):
         if match_limit:
             user_limit = int(match_limit.group(1))
             eval_rows = filtered_df.head(user_limit)
+        elif llm_plan and llm_plan.get("limit"):
+            eval_rows = filtered_df.head(llm_plan.get("limit"))
         else:
             eval_rows = filtered_df
 
