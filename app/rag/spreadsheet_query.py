@@ -358,7 +358,8 @@ def find_applicable_spreadsheets(candidate_paths, question):
         "rank", "highest", "lowest", "top", "bottom", "all", "count", "number", "hiring", "hired",
         "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
         "each", "their", "where", "can", "tell", "me", "record", "records", "item", "items", "entry", "entries",
-        "company", "companies", "product", "products", "student", "students", "employee", "employees"
+        "company", "companies", "product", "products", "student", "students", "employee", "employees",
+        "just", "please", "could", "would", "kindly", "also", "now"
     }
 
     query_tokens = [w for w in words_clean if w not in generic_terms and len(w) > 2 and not re.fullmatch(r"\d+(\.\d+)?", w)]
@@ -800,6 +801,7 @@ def execute_spreadsheet_query(file_path, question):
         "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
         "each", "their", "where", "can", "tell", "me", "company", "companies", "product", "products",
         "student", "students", "item", "items", "employee", "employees", "record", "records", "entry", "entries",
+        "just", "please", "could", "would", "kindly", "also", "now",
         "xlsx", "xls", "csv", "ods", "pdf", "docx", "txt", "md"
     }
 

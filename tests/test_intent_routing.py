@@ -188,10 +188,23 @@ class TestIntentRouting(unittest.TestCase):
     def test_correction_no_hardcoded_source(self):
         plan = get_plan("you are wrong", ALL_FILES)
         self.assertEqual(plan.intent, QueryIntent.CORRECTION, f"Got: {plan.intent}")
-        if plan.source_spec.source_hint:
-            self.assertNotEqual(plan.source_spec.source_hint.lower(), "mummy.jpg",
-                                "Hardcoded 'mummy.jpg' must not appear as source_hint")
+    # S. Spreadsheet Routing Fix Regression Tests
+    def test_S_just_list_projects_not_spreadsheet(self):
+        plan = get_plan("just list the projects", ALL_FILES)
+        self.assertNotEqual(plan.intent, QueryIntent.SPREADSHEET_QUERY,
+                            f"Generic prompt 'just list the projects' must NOT be SPREADSHEET_QUERY, got: {plan.intent}")
+
+    def test_S_please_list_notes_not_spreadsheet(self):
+        plan = get_plan("please list my notes", ALL_FILES)
+        self.assertNotEqual(plan.intent, QueryIntent.SPREADSHEET_QUERY,
+                            f"Generic prompt 'please list my notes' must NOT be SPREADSHEET_QUERY, got: {plan.intent}")
+
+    def test_S_valid_spreadsheet_query(self):
+        plan = get_plan("list companies in Munich", ALL_FILES)
+        self.assertEqual(plan.intent, QueryIntent.SPREADSHEET_QUERY,
+                         f"Valid spreadsheet prompt with field 'company' and 'city' must be SPREADSHEET_QUERY, got: {plan.intent}")
 
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

@@ -888,7 +888,7 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
             )
             or (
                 has_spreadsheet_operation
-                and (has_spreadsheet_field or modality in {"spreadsheet", "all"})
+                and (has_spreadsheet_field or modality == "spreadsheet")
             )
         )
     )
@@ -1168,11 +1168,11 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
             )
             or (
                 has_spreadsheet_operation
-                and (has_spreadsheet_field or modality in {"spreadsheet", "all"})
+                and (has_spreadsheet_field or modality == "spreadsheet")
             )
             or (
                 has_spreadsheet_field
-                and modality in {"spreadsheet", "all"}
+                and modality == "spreadsheet"
             )
         )
     )
