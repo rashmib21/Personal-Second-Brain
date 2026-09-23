@@ -1101,15 +1101,25 @@ class IntentRouter:
             if plan.modality == Modality.IMAGE:
                 return IntentRouter._handle_visual_qa(plan, question, analysis, return_structured)
 
-            full_content, total_chunks, _ = get_full_content_for_source(canonical_path)
+            from app.search.summary_search import get_clean_document_summary_context
+            full_content, total_chunks, sampled_count = get_clean_document_summary_context(canonical_path)
+            if not full_content or not full_content.strip():
+                full_content, total_chunks, _ = get_full_content_for_source(canonical_path)
+
             if full_content and len(full_content.strip()) > 0:
-                summary_prompt = f"""Summarize the following document context in response to the user's request.
+                summary_prompt = f"""Summarize the core topics, key concepts, main technical themes, and practical takeaways from the document context below.
+
+STRICT SUMMARIZATION RULES:
+1. Focus on the actual content, key ideas, technical concepts, and subject matter discussed in the text.
+2. Do NOT summarize chapter index numbers, page numbers, author names, or table of contents listings.
+3. Provide a well-structured, clear summary with main topic headings or key bullet points.
+
 Retrieved Context from {src_name}:
 {full_content}
 
 User Request: {question}
 
-Provide a clear, accurate, and structured summary strictly grounded in the context above:"""
+Structured Summary:"""
 
                 try:
                     raw_summary = ask_gemini(summary_prompt)

@@ -126,52 +126,45 @@ def find_document(question, df):
 
 def is_toc_chunk(text):
     """
-    Checks whether a chunk looks like
-    Table of Contents or other structural material.
+    Checks whether a chunk looks like Table of Contents, copyright, author credits,
+    or structural metadata rather than body content.
     """
-
-    text_lower = text.lower()
-
-    # Table of contents
-    if "table of contents" in text_lower:
+    if not text:
         return True
 
-    # Brief contents
-    if "brief contents" in text_lower:
+    text_lower = text.lower().strip()
+    if not text_lower:
         return True
 
-    # Detailed contents
-    if "contents in detail" in text_lower:
+    # Common TOC and structural metadata terms
+    metadata_terms = [
+        "table of contents", "brief contents", "contents in detail",
+        "about this book", "you may also like", "goalkicker.com",
+        "free programming books", "contributors", "acknowledgements",
+        "acknowledgments", "license", "copyright", "disclaimer"
+    ]
+    for term in metadata_terms:
+        if term in text_lower:
+            return True
+
+    if text_lower.startswith("contents"):
         return True
 
-    # Contents heading
-    if text_lower.strip().startswith("contents"):
-        return True
-
-    # Dotted TOC lines
-    #
-    # Example:
-    # Chapter 1: Getting Started ........ 1
-
+    # Dotted TOC lines (e.g. Chapter 1 ......... 12)
     if re.search(r"\.{3,}", text):
         return True
 
-    # Multiple chapter headings usually
-    # means this is a TOC.
-    chapter_matches = re.findall(
-        r"\bchapter\s*\d+\b",
-        text_lower
-    )
-
-    if len(chapter_matches) > 1:
+    # Multiple distinct chapter headings in a single chunk (e.g. Chapter 1, Chapter 2, Chapter 3...)
+    chapter_matches = re.findall(r"\bchapter\s*\d+\b", text_lower)
+    if len(set(chapter_matches)) > 2:
         return True
 
-    # Bibliography
-    if "bibliography" in text_lower:
+    # Bibliography or Index sections
+    if "bibliography" in text_lower or "\nindex" in text_lower or text_lower.startswith("index"):
         return True
 
-    # Index
-    if "\nindex" in text_lower:
+    # Check for author/chapter listing range patterns (e.g. Chapters 1-62: Various authors)
+    if "chapter" in text_lower and re.search(r"\bchapters\s*\d+\s*[-–to]\s*\d+", text_lower):
         return True
 
     return False
@@ -500,4 +493,87 @@ def search_for_book_summary(question, max_chunks=None):
         if(max_chunks is not None and len(results)>=max_chunks):
             break
 
-    return results                           
+    return results
+
+
+def get_clean_document_summary_context(source_path, max_chars=25000):
+    """
+    Retrieves clean, non-TOC body content for a document.
+    If total body text fits inside max_chars, returns full text.
+    If total body text exceeds max_chars, performs uniform sampling across
+    the document's sequence of body chunks to represent beginning, middle, and end.
+
+    Returns tuple: (context_str: str, total_chunks: int, sampled_count: int)
+    """
+    table = get_table()
+    if table is None:
+        return "", 0, 0
+
+    df = table.to_pandas()
+    if df.empty or "path" not in df.columns:
+        return "", 0, 0
+
+    target_base = os.path.basename(source_path).lower()
+    source_path_lower = str(source_path).lower()
+
+    # Filter rows for target source
+    matching_mask = (df["path"].str.lower() == source_path_lower) | (
+        df["path"].apply(lambda p: os.path.basename(str(p)).lower()) == target_base
+    )
+    document_df = df[matching_mask].copy()
+
+    if document_df.empty:
+        return "", 0, 0
+
+    def extract_chunk_idx(row):
+        cid = str(row.get("chunk_id", ""))
+        match = re.search(r"_chunk_(\d+)", cid)
+        if match:
+            return int(match.group(1))
+        return 0
+
+    document_df["_sort_idx"] = document_df.apply(extract_chunk_idx, axis=1)
+    document_df = document_df.sort_values("_sort_idx")
+
+    rows = list(document_df.itertuples(index=False))
+    total_chunks = len(rows)
+
+    # Filter out TOC / metadata / author list chunks
+    body_chunks = []
+    for row in rows:
+        text = str(row.text or "").strip()
+        if not text:
+            continue
+        if is_toc_chunk(text):
+            continue
+        body_chunks.append(text)
+
+    # Fallback: if filtering removed all chunks, use original non-empty chunks
+    if not body_chunks:
+        body_chunks = [str(r.text).strip() for r in rows if str(r.text or "").strip()]
+
+    if not body_chunks:
+        return "", 0, 0
+
+    total_body_text = "\n\n".join(body_chunks)
+
+    # Case 1: Total body text fits within max_chars limit
+    if len(total_body_text) <= max_chars:
+        return total_body_text, total_chunks, len(body_chunks)
+
+    # Case 2: Uniform sampling across document sequence
+    num_body = len(body_chunks)
+    avg_chunk_len = sum(len(c) for c in body_chunks) / num_body
+    target_count = max(5, int(max_chars / max(1, avg_chunk_len)))
+    target_count = min(target_count, num_body)
+
+    indices = [
+        int(i * (num_body - 1) / (target_count - 1)) for i in range(target_count)
+    ] if target_count > 1 else [0]
+    indices = sorted(list(set(indices)))
+
+    sampled_chunks = [body_chunks[idx] for idx in indices]
+    context_str = "\n\n--- SECTION BREAK ---\n\n".join(sampled_chunks)
+
+    return context_str, total_chunks, len(sampled_chunks)
+
