@@ -558,6 +558,25 @@ def format_response(arg1, arg2=None, arg3=None, arg4=0, evidence=None):
     # 4. NUMBER OF RELEVANT CHUNKS
     sections.append(f"{header}\nNUMBER OF RELEVANT CHUNKS\n{header}\n{num_chunks}")
 
+    # 5. RELEVANT CHUNKS EVIDENCE
+    evidence_items = evidence
+    if isinstance(arg2, dict) and not evidence_items:
+        evidence_items = arg2.get("evidence") or arg2.get("chunks") or []
+
+    if evidence_items:
+        chunk_blocks = []
+        for idx, item in enumerate(evidence_items, 1):
+            if isinstance(item, dict):
+                src_name = os.path.basename(item.get("source") or item.get("filename") or "Chunk")
+                c_id = item.get("chunk_id") or idx
+                content_text = item.get("text") or item.get("content") or str(item)
+                chunk_blocks.append(f"[{idx}] Source: {src_name} (Chunk #{c_id})\n{content_text.strip()}")
+            elif isinstance(item, str):
+                chunk_blocks.append(f"[{idx}] {item.strip()}")
+
+        if chunk_blocks:
+            sections.append(f"{header}\nRELEVANT CHUNKS\n{header}\n" + "\n\n".join(chunk_blocks))
+
     return "\n\n".join(sections)
 
 
