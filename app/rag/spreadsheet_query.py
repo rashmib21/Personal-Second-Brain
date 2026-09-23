@@ -25,12 +25,13 @@ import json
 import pandas as pd
 from openpyxl import load_workbook
 from app.storage.lancedb_store import get_spreadsheet_table
-from app.llm.ollama_client import ask_llama
+from app.llm.ollama_client import ask_llama, ask_spreadsheet_llm
 from app.services.interaction_state import (
     get_last_interaction,
     set_spreadsheet_context,
     get_spreadsheet_context
 )
+
 
 
 def normalize_string(value):
@@ -501,7 +502,7 @@ RULES:
     sys_instruction = "You are a precise JSON query plan parser for spreadsheets. Output valid JSON only."
 
     try:
-        raw_response = ask_llama(prompt, system_instruction=sys_instruction)
+        raw_response = ask_spreadsheet_llm(prompt, system_instruction=sys_instruction)
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
             plan = json.loads(json_match.group(0))
@@ -510,6 +511,83 @@ RULES:
         pass
 
     return None
+
+
+def generate_spreadsheet_summary(file_path, sheets, question=""):
+    """
+    Generates a comprehensive statistical and natural-language summary overview of a spreadsheet dataset.
+    Profiles sheet names, row counts, column types, metric ranges, top category distributions,
+    and uses the dedicated SPREADSHEET_MODEL_NAME to synthesize a structured markdown summary.
+    """
+    if not sheets:
+        return f"No readable data found in '{os.path.basename(file_path)}'.", 0
+
+    filename = os.path.basename(file_path)
+    total_rows_across_sheets = 0
+    all_sheet_reports = []
+
+    for sheet_name, sheet_data in sheets.items():
+        df = sheet_data["df"]
+        schema = sheet_data["schema"]
+        headers = schema["headers"]
+        col_types = schema["column_types"]
+        row_count = len(df)
+        total_rows_across_sheets += row_count
+
+        sheet_report = f"### Sheet: '{sheet_name}' ({row_count} total records)\n"
+        sheet_report += f"- **Columns ({len(headers)}):** {', '.join(headers)}\n"
+
+        # Categorical column profiling (top 3 values with counts)
+        text_cols = [c for c in headers if col_types.get(c) == "text"]
+        cat_insights = []
+        for c in text_cols[:4]:
+            val_counts = df[c].dropna().value_counts()
+            if not val_counts.empty:
+                top_items = [f"{val} ({cnt})" for val, cnt in val_counts.head(3).items()]
+                cat_insights.append(f"  - **{c}**: Top values: {', '.join(top_items)}")
+        if cat_insights:
+            sheet_report += "- **Key Category Breakdown:**\n" + "\n".join(cat_insights) + "\n"
+
+        # Numeric metric profiling (min, max, avg)
+        num_cols = [c for c in headers if col_types.get(c) == "numeric"]
+        num_insights = []
+        for c in num_cols[:3]:
+            parsed_vals = df[c].apply(parse_numeric_value).dropna()
+            if not parsed_vals.empty:
+                min_v = parsed_vals.min()
+                max_v = parsed_vals.max()
+                avg_v = parsed_vals.mean()
+                num_insights.append(f"  - **{c}**: Range = {min_v:g} to {max_v:g} (Average: {avg_v:.2f})")
+        if num_insights:
+            sheet_report += "- **Metric Ranges:**\n" + "\n".join(num_insights) + "\n"
+
+        all_sheet_reports.append(sheet_report)
+
+    combined_profile = "\n".join(all_sheet_reports)
+
+    # Use ask_spreadsheet_llm to synthesize a clean executive summary
+    prompt = f"""
+You are an expert Data Engineering and Analytics assistant.
+Provide a clear, structured summary overview of the following spreadsheet file: '{filename}'.
+
+DATASET STATISTICAL PROFILE:
+{combined_profile}
+
+Write a concise summary report highlighting:
+1. What dataset this spreadsheet contains (purpose/domain).
+2. Key structure (sheets, row count, main columns).
+3. Significant insights (top categories, metric ranges).
+Keep the summary factual, professional, and formatted in clean GitHub markdown.
+"""
+    sys_instruction = "You are a helpful spreadsheet analytics assistant. Synthesize grounded dataset summaries."
+
+    try:
+        llm_summary = ask_spreadsheet_llm(prompt, system_instruction=sys_instruction)
+        final_answer = f"## Spreadsheet Overview: `{filename}`\n\n{combined_profile}\n### Executive Summary\n{llm_summary}"
+    except Exception:
+        final_answer = f"## Spreadsheet Overview: `{filename}`\n\n{combined_profile}"
+
+    return final_answer, total_rows_across_sheets
 
 
 def execute_spreadsheet_query(file_path, question):
@@ -528,6 +606,11 @@ def execute_spreadsheet_query(file_path, question):
     conv_history = last_interaction.get("question", "") if last_interaction else ""
     struct_ctx = get_spreadsheet_context()
 
+    # Check for Summary / Overview intent
+    is_summary_op = bool(re.search(r"\b(?:summarize|summary|overview|describe|stats|structure|details|about)\b", q_norm))
+    if is_summary_op:
+        return generate_spreadsheet_summary(file_path, sheets, question)
+
     # Generate LLM Query Plan
     llm_plan = generate_structured_query_plan(
         question,
@@ -536,10 +619,14 @@ def execute_spreadsheet_query(file_path, question):
         structured_context=struct_ctx
     )
 
+    if llm_plan and llm_plan.get("operation") in ["SUMMARY", "OVERVIEW"]:
+        return generate_spreadsheet_summary(file_path, sheets, question)
+
     # Fail closed if LLM query plan determined ungrounded concept
     if llm_plan and llm_plan.get("operation") == "UNGROUNDED":
         reason = llm_plan.get("ungrounded_reason") or f"unsupported filter in '{question}'"
         return f"I can't determine that from this spreadsheet because {reason}.", 0
+
 
     # Dynamic Sheet Selection fallback
     target_sheet_name = None

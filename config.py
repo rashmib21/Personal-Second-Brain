@@ -26,3 +26,7 @@ ELEVENLABS_API_KEY=os.getenv("ELEVENLABS_API_KEY","")
 # Debug mode flag for internal diagnostic logging
 DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "t", "yes")
 
+# Dedicated model for structured spreadsheet query processing and summarization
+SPREADSHEET_MODEL_NAME = os.getenv("SPREADSHEET_MODEL_NAME", "qwen2.5-coder:14b")
+
+
