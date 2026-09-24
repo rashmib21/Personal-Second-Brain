@@ -108,15 +108,10 @@ def is_image_question(question):
 		"what does the image show",
 		"what information is shown",
 		"describe the image",
-	    "describe this image",
-
-		"which job",
-		"which jobs",
-		"what job",
-		"what jobs",
+		"describe this image",
 	]
 
-	return any(word in question_lower for word in image_words)
+	return any(re.search(r"\b" + re.escape(word) + r"\b", question_lower) for word in image_words)
 
 
 def search(question, max_results=10, analysis=None, preferred_sources=None, rejected_sources=None):
@@ -528,21 +523,20 @@ def search_images_by_text(question, max_results=5):
 		.limit(max_results)
 		.to_list()
 	)
-	filtered_results = results
-	# is_image_query = any(w in question.lower() for w in ["image", "picture", "photo", "diagram", "chart", "figure"])
-	# filtered_results = []
-	# for res in results:
-	# 	dist = res.get("_distance", 1.0)
-	# 	if (is_image_query and dist < 0.85) or (not is_image_query and dist < 0.55):
-	# 		filtered_results.append(res)
+	is_image_query = is_image_question(question)
+	filtered_results = []
+	for res in results:
+		dist = res.get("_distance", 1.0)
+		if (is_image_query and dist < 0.85) or (not is_image_query and dist < 0.55):
+			filtered_results.append(res)
 
 	if DEBUG:
 		print("\nImage Text Query: ", question)
 		print("Relevant Images: ", len(filtered_results))
 
-		for result in results:
-			print("Source: ", os.path.basename(result['path']))
-	return results		
+		for result in filtered_results:
+			print("Source: ", os.path.basename(result['path']), "Distance:", result.get('_distance'))
+	return filtered_results		
 
 
 def get_full_content_for_source(source_path):

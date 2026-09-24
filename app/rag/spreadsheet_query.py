@@ -41,6 +41,33 @@ def normalize_string(value):
     return re.sub(r"\s+", " ", str(value).strip().lower())
 
 
+from nltk.stem import PorterStemmer
+
+_STEMMER = PorterStemmer()
+
+# generic English shorthand only (not domain concepts); extend if your sheets use others
+_ABBREV = {
+    "dev": "developer", "devs": "developer", "eng": "engineer", "engg": "engineer",
+    "mgr": "manager", "sr": "senior", "jr": "junior", "admin": "administrator",
+    "ops": "operations", "exp": "experience", "asst": "assistant",
+}
+
+
+def _words(text):
+    return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def _canon(word):
+    return _STEMMER.stem(_ABBREV.get(word, word))
+
+
+def token_mask(series, token):
+    """Rows of `series` containing `token` (stem-aware: developers == developer == 'Dev')."""
+    t = _canon(token)
+    mask = series.fillna("").astype(str).map(lambda x: t in {_canon(w) for w in _words(x)})
+    return mask, "exact"
+
+
 def parse_numeric_value(value):
     """
     Parses a cell value into float or None.
@@ -358,8 +385,7 @@ def find_applicable_spreadsheets(candidate_paths, question):
         "rank", "highest", "lowest", "top", "bottom", "all", "count", "number", "hiring", "hired",
         "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
         "each", "their", "where", "can", "tell", "me", "record", "records", "item", "items", "entry", "entries",
-        "company", "companies", "product", "products", "student", "students", "employee", "employees",
-        "just", "please", "could", "would", "kindly", "also", "now"
+        "company", "companies", "product", "products", "student", "students", "employee", "employees"
     }
 
     query_tokens = [w for w in words_clean if w not in generic_terms and len(w) > 2 and not re.fullmatch(r"\d+(\.\d+)?", w)]
@@ -367,6 +393,7 @@ def find_applicable_spreadsheets(candidate_paths, question):
         return candidate_paths
 
     scores = {}
+    coverage = {}
 
     for path in candidate_paths:
         sheets = load_structured_spreadsheet_from_lancedb(path)
@@ -374,45 +401,42 @@ def find_applicable_spreadsheets(candidate_paths, question):
             continue
 
         score = 0
+        covered = set()
         for sheet_name, data in sheets.items():
             s_norm = normalize_string(sheet_name)
-
-            # Match sheet name
-            for token in query_tokens:
-                if re.search(r"\b" + re.escape(token) + r"\b", s_norm):
-                    score += 10
-
             df = data["df"]
             schema = data["schema"]
             headers = schema["headers"]
 
-            # Match headers
-            for col in headers:
-                c_norm = normalize_string(col)
-                for token in query_tokens:
-                    if re.search(r"\b" + re.escape(token) + r"\b", c_norm):
+            for token in query_tokens:
+                if re.search(r"\b" + re.escape(token) + r"\b", s_norm):
+                    score += 10
+                    covered.add(token)
+                for col in headers:
+                    if re.search(r"\b" + re.escape(token) + r"\b", normalize_string(col)):
                         score += 5
-
-            # Match cell values in text columns
-            for col in headers:
-                if schema["column_types"].get(col) == "text":
-                    series_str = df[col].dropna().astype(str).str.lower()
-                    for token in query_tokens:
-                        if series_str.str.contains(r"\b" + re.escape(token) + r"\b", regex=True, na=False).any():
+                        covered.add(token)
+                    if schema["column_types"].get(col) == "text" and col in df.columns:
+                        mask, _ = token_mask(df[col], token)
+                        if mask.any():
                             score += 2
+                            covered.add(token)
 
         scores[path] = score
+        coverage[path] = len(covered)
 
     if not scores:
         return candidate_paths
 
-    sorted_candidates = sorted(scores.keys(), key=lambda p: scores[p], reverse=True)
-    top_score = scores[sorted_candidates[0]]
+    # A workbook that can ground MORE of the query words wins, even if another
+    # workbook has a higher raw hit count (e.g. role words repeated on every row).
+    best_cov = max(coverage.values())
+    pool = [p for p in scores if coverage[p] == best_cov]
+    pool.sort(key=lambda p: scores[p], reverse=True)
+    top_score = scores[pool[0]]
 
-    if top_score > 0:
-        best_candidates = [p for p in sorted_candidates if scores[p] > 0 and (top_score - scores[p]) <= 5]
-        return best_candidates
-
+    if best_cov > 0:
+        return [p for p in pool if (top_score - scores[p]) <= 5]
     return candidate_paths
 
 
@@ -629,36 +653,45 @@ def execute_spreadsheet_query(file_path, question):
         return f"I can't determine that from this spreadsheet because {reason}.", 0
 
 
-    # Dynamic Sheet Selection fallback
-    target_sheet_name = None
-    if llm_plan and llm_plan.get("target_sheet") in sheets:
-        target_sheet_name = llm_plan.get("target_sheet")
+    # Sheet scope: restrict ONLY to sheets the question names; otherwise search ALL sheets.
+    named_sheets = []
+    for sheet_name in sheets.keys():
+        toks = [w for w in normalize_string(sheet_name).split() if len(w) > 1]
+        if any(re.search(r"\b" + re.escape(t) + r"\b", q_norm) for t in toks):
+            named_sheets.append(sheet_name)
 
-    if not target_sheet_name:
-        for sheet_name in sheets.keys():
-            s_norm = normalize_string(sheet_name)
-            sheet_tokens = [w for w in s_norm.split() if len(w) > 1]
-            for token in sheet_tokens:
-                pattern = r"\b" + re.escape(token) + r"\b"
-                if re.search(pattern, q_norm):
-                    target_sheet_name = sheet_name
-                    break
-            if target_sheet_name:
-                break
+    scope_sheets = named_sheets or list(sheets.keys())
+    sheet_col = "Sheet" if "Sheet" not in sheets[scope_sheets[0]]["df"].columns else "_Sheet"
 
-    if not target_sheet_name:
-        target_sheet_name = list(sheets.keys())[0]
+    if len(scope_sheets) == 1:
+        target_sheet_name = scope_sheets[0]
+        df = sheets[target_sheet_name]["df"].copy()
+        multi_scope = False
+    else:
+        frames = []
+        for sn in scope_sheets:
+            f = sheets[sn]["df"].copy()
+            f[sheet_col] = sn
+            frames.append(f)
+        df = pd.concat(frames, ignore_index=True)
+        target_sheet_name = "all sheets" if not named_sheets else ", ".join(scope_sheets)
+        multi_scope = True
 
-    sheet_data = sheets[target_sheet_name]
-    df = sheet_data["df"].copy()
-    schema = sheet_data["schema"]
+    schema = inspect_sheet_schema(df, target_sheet_name)
+    from collections import Counter
+    _ents = Counter(sheets[sn]["schema"]["entity_column"] for sn in scope_sheets)
+    preferred_entity = _ents.most_common(1)[0][0]
     headers = schema["headers"]
     col_types = schema["column_types"]
+    if multi_scope:
+        col_types[sheet_col] = "text"
 
     # Dynamic Column Resolution
     entity_col = None
     if llm_plan and llm_plan.get("entity_column") in headers:
         entity_col = llm_plan.get("entity_column")
+    if not entity_col and preferred_entity in headers:
+        entity_col = preferred_entity
     if not entity_col:
         best_ratio = -1.0
         for col in headers:
@@ -801,8 +834,7 @@ def execute_spreadsheet_query(file_path, question):
         "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
         "each", "their", "where", "can", "tell", "me", "company", "companies", "product", "products",
         "student", "students", "item", "items", "employee", "employees", "record", "records", "entry", "entries",
-        "just", "please", "could", "would", "kindly", "also", "now",
-        "xlsx", "xls", "csv", "ods", "pdf", "docx", "txt", "md"
+        "xlsx", "xls", "csv", "ods", "pdf", "docx", "txt", "md", "total", "listed", "hiring", "roles", "role"
     }
 
     candidate_phrases = []
@@ -816,7 +848,7 @@ def execute_spreadsheet_query(file_path, question):
 
     candidate_phrases = sorted(list(set(candidate_phrases)), key=len, reverse=True)
 
-    matched_columns_and_vals = []
+    matched_tokens = {}      # token -> {column: (mask, mode)}
     for phrase in candidate_phrases:
         if len(phrase) <= 2 or phrase in stopwords:
             continue
@@ -836,17 +868,17 @@ def execute_spreadsheet_query(file_path, question):
         found_cell_match = False
         for token in p_tokens:
             token_header_match = any(re.search(r"\b" + re.escape(token) + r"\b", normalize_string(h)) for h in headers)
-            if token_header_match:
+            token_sheet_match = any(re.search(r"\b" + re.escape(token) + r"\b", normalize_string(s)) for s in sheets.keys())
+            if token_header_match or token_sheet_match:
                 found_cell_match = True
+                continue
 
             for col in headers:
-                if col_types.get(col) == "text":
-                    series_str = df[col].dropna().astype(str).str.lower()
-                    matches = series_str[series_str.str.contains(r"\b" + re.escape(token) + r"\b", regex=True, na=False)]
-                    if not matches.empty:
+                if col_types.get(col) == "text" and col in df.columns:
+                    mask, mode = token_mask(df[col], token)
+                    if mask.any():
                         found_cell_match = True
-                        if (col, token) not in matched_columns_and_vals and not token_header_match:
-                            matched_columns_and_vals.append((col, token))
+                        matched_tokens.setdefault(token, {})[col] = (mask, mode)
 
         if not found_cell_match:
             ungrounded_phrases.append(phrase)
@@ -855,15 +887,19 @@ def execute_spreadsheet_query(file_path, question):
         missing_term = ungrounded_phrases[0]
         return f"I can't determine that from this spreadsheet because I couldn't find a column or categorical value that represents '{missing_term}' in the workbook.", 0
 
-    # Apply filters with safe index alignment
-    for col, val_str in matched_columns_and_vals:
-        if col in filtered_df.columns:
-            mask = filtered_df[col].astype(str).str.lower().str.contains(r"\b" + re.escape(val_str) + r"\b", regex=True, na=False)
-            mask = mask.reindex(filtered_df.index, fill_value=False)
-            filtered_df = filtered_df[mask].reset_index(drop=True)
+    matched_columns_and_vals = [(c, t) for t, cm in matched_tokens.items() for c in cm]
+    loose_notes = sorted({t for t, cm in matched_tokens.items() if any(m == "abbrev" for _, m in cm.values())})
+
+    # every query word must match (AND); a word may match in any column (OR)
+    for token, colmap in matched_tokens.items():
+        combined = None
+        for col, (mask, mode) in colmap.items():
+            combined = mask if combined is None else (combined | mask)
+        filtered_df = filtered_df[combined.loc[filtered_df.index]]
+    filtered_df = filtered_df.reset_index(drop=True)
 
     # Apply LLM plan filters if available
-    if llm_plan and llm_plan.get("filters"):
+    if llm_plan and llm_plan.get("filters") and not matched_tokens:
         for f_item in llm_plan.get("filters"):
             f_col = f_item.get("column")
             f_op = f_item.get("operator")
@@ -890,7 +926,7 @@ def execute_spreadsheet_query(file_path, question):
     # ------------------------------------------------------------
     is_count = (llm_plan and llm_plan.get("operation") == "COUNT") or bool(re.search(r"\b(?:how\s+many|number\s+of|count|is\s+there\s+any)\b", q_norm))
     is_avg = bool(re.search(r"\b(?:average|avg|mean)\b", q_norm))
-    is_sum = bool(re.search(r"\b(?:total|sum)\b", q_norm))
+    is_sum = bool(re.search(r"\b(?:total|sum)\b", q_norm)) and not is_count
     is_ranking = (llm_plan and llm_plan.get("operation") == "RANKING") or bool(re.search(r"\b(?:highest|lowest|top|bottom|max|min|best|worst|largest|smallest)\b", q_norm))
 
     if is_count and not is_ranking and not is_avg and not is_sum:
@@ -899,10 +935,12 @@ def execute_spreadsheet_query(file_path, question):
         else:
             cnt = len(filtered_df)
 
+        rows_n = len(filtered_df)
+        dup_note = f" ({rows_n} rows; some {entity_col} values repeat across sheets)" if rows_n != cnt else ""
         if matched_columns_and_vals:
             filter_desc = ", ".join([f"{c}='{v}'" for c, v in matched_columns_and_vals])
-            return f"There are {cnt} items matching {filter_desc} in '{target_sheet_name}'.", cnt
-        return f"There are {cnt} items listed in '{target_sheet_name}'.", cnt
+            return f"There are {cnt} items matching {filter_desc} in '{target_sheet_name}'.{dup_note}", cnt
+        return f"There are {cnt} items listed in '{target_sheet_name}'.{dup_note}", cnt
 
     if is_avg and metric_col and "_numeric_val" in filtered_df.columns:
         valid_nums = filtered_df["_numeric_val"].dropna()
@@ -948,7 +986,15 @@ def execute_spreadsheet_query(file_path, question):
 
     if not filtered_df.empty:
         lines = []
-        display_cols = [c for c in [entity_col, metric_col] if c and c in filtered_df.columns]
+        display_cols = [entity_col] if entity_col in filtered_df.columns else []
+        if multi_scope and sheet_col in filtered_df.columns:
+            display_cols.append(sheet_col)
+        for c, _ in matched_columns_and_vals:            # show the columns the answer was filtered on
+            if c in filtered_df.columns and c not in display_cols:
+                display_cols.append(c)
+        metric_asked = metric_col and any(w in q_norm for w in normalize_string(metric_col).split() if len(w) > 2)
+        if metric_asked and metric_col in filtered_df.columns and metric_col not in display_cols:
+            display_cols.append(metric_col)
         if not display_cols:
             display_cols = headers[:3]
 
@@ -966,6 +1012,8 @@ def execute_spreadsheet_query(file_path, question):
             parts = [f"{col}: {row.get(col, '')}" for col in display_cols if pd.notna(row.get(col))]
             lines.append(f"{idx}. " + " | ".join(parts))
 
+        if loose_notes:
+            lines.append(f"(Note: matched {', '.join(repr(t) for t in loose_notes)} loosely against abbreviations such as 'Dev'.)")
         return "\n".join(lines), len(filtered_df)
 
     return "No matching spreadsheet records found.", 0
