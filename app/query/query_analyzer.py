@@ -1041,6 +1041,24 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
                 exc
             )
 
+    if source_hint is None:
+        try:
+            from app.query.clarification import carry_over_source
+            from app.services.interaction_state import get_last_interaction
+            last_state = get_last_interaction()
+            carried = carry_over_source(question, last_state, modality_hint=modality)
+            if carried:
+                for fname in indexed_files:
+                    if fname.lower() == os.path.basename(str(carried)).lower():
+                        source_hint = fname
+                        source_confidence = 0.95
+                        break
+                if source_hint is None:
+                    source_hint = os.path.basename(str(carried))
+                    source_confidence = 0.90
+        except Exception as exc:
+            logger.warning("Failed to resolve carry-over source reference: %s", exc)
+
 
     # ------------------------------------------------------------
     # 5. Structural source-reference detection

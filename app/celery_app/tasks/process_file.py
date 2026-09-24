@@ -4,7 +4,7 @@ import os
 import uuid
 
 from app.extractors.router import extract_file
-from app.storage.lancedb_store import save_file_hash, is_file_processed, store_chunk, store_image_chunk, store_face_record, deduplicate_and_store_faces
+from app.storage.lancedb_store import save_file_hash, is_file_processed, store_chunk, store_image_chunk, store_face_record, deduplicate_and_store_faces, delete_source_records
 from app.embeddings.embedding_router import generate_embedding
 from app.chunker.chunker import chunk_text
 from app.embeddings.image_embedding import embed_image
@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 def route_file(self, event):
     path = event["path"]
+    event_type = event.get("event_type", "created")
+    if event_type == "deleted":
+        delete_source_records(path)
+        return {"status": "deleted", "path": path}
     file_type = event["file_type"]
     file_hash = event["file_hash"]
 
@@ -31,6 +35,7 @@ def route_file(self, event):
         return {"status": "duplicate", "path": path}
 
     logger.info(f"Started processing: {path}")
+    delete_source_records(path)
 
     filename = os.path.basename(path)
     extracted_data = extract_file(path)
@@ -39,9 +44,8 @@ def route_file(self, event):
     if isinstance(extracted_data, dict):
         status = extracted_data.get("status", "SUCCESS")
         if status != "SUCCESS":
-            logger.warning(f"File processing skipped for {path}: status={status}, error={extracted_data.get('error')}")
-            save_file_hash(file_hash=file_hash, path=path)
-            return {"status": status, "path": path, "total_chunks": 0}
+            logger.warning(f"File processing failed for {path}: status={status}, error={extracted_data.get('error')}")
+            raise RuntimeError(extracted_data.get("error") or f"Extraction failed with status {status}")
 
     chunks = []
 
@@ -159,6 +163,17 @@ def route_file(self, event):
 
     # Save hash to avoid re-processing same file
     save_file_hash(file_hash=file_hash, path=path)
+
+    # Build and save source_catalog entry using local Ollama (ask_llama)
+    try:
+        from app.query.source_catalog import build_entry, save_entry
+        from app.llm.ollama_client import ask_llama
+        sample_text = "\n".join(chunks)[:2500] if chunks else ""
+        entry = build_entry(path, sample_text, ask_llama, file_type)
+        save_entry(entry)
+        logger.info(f"Source catalog entry saved for {path}")
+    except Exception as exc:
+        logger.warning(f"Failed to save source catalog entry for {path}: {exc}")
 
     logger.info(f"Finished processing: {path}")
 

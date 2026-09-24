@@ -164,6 +164,22 @@ class IntentRouter:
         if spreadsheet_selection_result is not None:
             return spreadsheet_selection_result
 
+        # STEP 2: Pending general clarification handler
+        from app.services.interaction_state import get_pending_clarification, clear_pending_clarification, set_pending_clarification
+        from app.query.clarification import resolve_selection
+
+        pending = get_pending_clarification()
+        if pending.get("query"):
+            picked = resolve_selection(question, pending["candidates"])
+            clear_pending_clarification()
+            if picked:
+                orig = build_query_plan(pending["query"])
+                sp = orig.source_spec
+                sp.canonical_path, sp.source_hint = picked, os.path.basename(picked)
+                sp.is_explicit = sp.is_resolved = True
+                sp.is_ambiguous, sp.confidence, sp.candidate_sources = False, 1.0, []
+                return IntentRouter.dispatch(orig, pending["query"], orig.to_dict(), return_structured)
+
         from app.services.interaction_state import get_pending_faces
 
         pending_faces = get_pending_faces()
@@ -179,6 +195,43 @@ class IntentRouter:
                 analysis,
                 return_structured
             )
+
+        # STEP 4: Catalog-based source resolution (before ambiguity guard)
+        sidebar_active_file = analysis.get("active_file") or analysis.get("sidebar_file")
+        if not plan.source_spec.is_resolved and not plan.source_spec.is_explicit and not sidebar_active_file:
+            try:
+                from app.query.source_catalog import load_catalog, resolve_by_catalog
+                entries = load_catalog()
+                if entries:
+                    chat_mod = plan.modality.value.lower() if hasattr(plan.modality, "value") else str(plan.modality).lower()
+                    if chat_mod != "all":
+                        if chat_mod in ("pdf", "docx", "document", "text"):
+                            entries = [e for e in entries if e.get("modality") in ("pdf", "docx", "document", "text")]
+                        elif chat_mod == "image":
+                            entries = [e for e in entries if e.get("modality") in ("image",)]
+                        elif chat_mod == "spreadsheet":
+                            entries = [e for e in entries if e.get("modality") in ("spreadsheet",)]
+                        elif chat_mod == "audio":
+                            entries = [e for e in entries if e.get("modality") in ("audio",)]
+
+                    needs_text = plan.intent not in (QueryIntent.IMAGE_DISPLAY, QueryIntent.VISUAL_QA, QueryIntent.IMAGE_FACE_QUERY)
+                    hits = resolve_by_catalog(question, entries, needs_text=needs_text)
+                    if len(hits) == 1:
+                        hit_file = hits[0]["file"]
+                        hit_path = hits[0].get("path") or hit_file
+                        sp = plan.source_spec
+                        sp.canonical_path = hit_path
+                        sp.source_hint = hit_file
+                        sp.is_resolved = True
+                        sp.is_explicit = False
+                        sp.is_ambiguous = False
+                        sp.confidence = 0.95
+                    elif len(hits) > 1:
+                        sp = plan.source_spec
+                        sp.candidate_sources = [h["file"] for h in hits]
+                        sp.is_ambiguous = True
+            except Exception as exc:
+                logger.warning("Catalog source resolution error: %s", exc)
 
         # Step 1: Incomplete / Ambiguous Source Clarification Guard
         # If the request requires a single source file (e.g. full file summarization, full transcript fetch, visual QA)
@@ -196,7 +249,12 @@ class IntentRouter:
             and not has_topic_context
         ):
             if plan.source_spec.candidate_sources and len(plan.source_spec.candidate_sources) > 1:
-                cand_str = " and ".join(plan.source_spec.candidate_sources[:2])
+                set_pending_clarification(question, plan.source_spec.candidate_sources)
+                cands = plan.source_spec.candidate_sources
+                if len(cands) == 2:
+                    cand_str = f"{cands[0]} and {cands[1]}"
+                else:
+                    cand_str = ", ".join(cands[:-1]) + f" and {cands[-1]}"
                 clarification_msg = f"I found multiple files that might match your request: {cand_str}. Which one did you mean?"
             elif plan.intent == QueryIntent.SUMMARIZATION:
                 clarification_msg = "Sure — which file would you like me to summarize?"

@@ -1,0 +1,246 @@
+[
+ {
+  "file": "Rashmi_Barethiya_19-05.pdf",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/Rashmi_Barethiya_19-05.pdf",
+  "modality": "pdf",
+  "doc_type": "resume",
+  "owner": "Rashmi Barethiya",
+  "topics": [
+   "data engineering",
+   "full-stack development",
+   "AI-integrated platforms",
+   "machine learning",
+   "Python",
+   "Java",
+   "SQL"
+  ],
+  "summary": "MCA graduate with hands-on experience in data engineering, full-stack development, and AI-integrated platforms.",
+  "has_text": true
+ },
+ {
+  "file": "Rashmi_Barethiya_Tata_Communications.docx",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/Rashmi_Barethiya_Tata_Communications.docx",
+  "modality": "docx",
+  "doc_type": "resume",
+  "owner": "Rashmi Barethiya",
+  "topics": [
+   "Software Engineer",
+   "Backend Development",
+   "Technical Skills",
+   "Professional Experience"
+  ],
+  "summary": "Software Engineer with strong fundamentals in Object-Oriented Programming and experience in building REST APIs, database-driven applications, and data pipelines.",
+  "has_text": true
+ },
+ {
+  "file": "linux.pdf",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/linux.pdf",
+  "modality": "pdf",
+  "doc_type": "book",
+  "owner": "",
+  "topics": [
+   "Linux",
+   "operating system",
+   "superuser",
+   "Brian Ward"
+  ],
+  "summary": "A comprehensive guide to Linux, covering its architecture and usage.",
+  "has_text": true
+ },
+ {
+  "file": "quantum_notes.txt",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/quantum_notes.txt",
+  "modality": "txt",
+  "doc_type": "research paper",
+  "owner": "",
+  "topics": [
+   "quantum computing",
+   "supremacy",
+   "qubits"
+  ],
+  "summary": "Overview of quantum computing, including supremacy and qubit capabilities.",
+  "has_text": true
+ },
+ {
+  "file": "SQLNotesForProfessionals.pdf",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/SQLNotesForProfessionals.pdf",
+  "modality": "pdf",
+  "doc_type": "research paper",
+  "owner": "",
+  "topics": [
+   "SQL",
+   "database",
+   "programming",
+   "hints",
+   "tricks"
+  ],
+  "summary": "Professional hints and tricks for SQL",
+  "has_text": true
+ },
+ {
+  "file": "Cracking the Tech Career.pdf",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/Cracking the Tech Career.pdf",
+  "modality": "pdf",
+  "doc_type": "",
+  "owner": "",
+  "topics": [],
+  "summary": "",
+  "has_text": true
+ },
+ {
+  "file": "dense3.webp",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/dense3.webp",
+  "modality": "image",
+  "doc_type": "",
+  "owner": "",
+  "topics": [],
+  "summary": "",
+  "has_text": false
+ },
+ {
+  "file": "dense2.webp",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/dense2.webp",
+  "modality": "image",
+  "doc_type": "",
+  "owner": "",
+  "topics": [],
+  "summary": "",
+  "has_text": false
+ },
+ {
+  "file": "dense.jpeg",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/dense.jpeg",
+  "modality": "image",
+  "doc_type": "screenshot",
+  "owner": "",
+  "topics": [
+   "cell structure",
+   "biology",
+   "science"
+  ],
+  "summary": "Detailed diagram of a cell structure from an academic or scientific publication.",
+  "has_text": false
+ },
+ {
+  "file": "entry_level_jobs.webp",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/entry_level_jobs.webp",
+  "modality": "image",
+  "doc_type": "research paper",
+  "owner": "",
+  "topics": [
+   "data science",
+   "entry-level jobs",
+   "career development"
+  ],
+  "summary": "Information on entry-level jobs in data science, including responsibilities and required skills.",
+  "has_text": true
+ },
+ {
+  "file": "test_image.png",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/test_image.png",
+  "modality": "image",
+  "doc_type": "photo",
+  "owner": "",
+  "topics": [
+   "image",
+   "faces"
+  ],
+  "summary": "Image with multiple faces detected.",
+  "has_text": false
+ },
+ {
+  "file": "momo_frame_0.jpg",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/momo_frame_0.jpg",
+  "modality": "image",
+  "doc_type": "photo",
+  "owner": "",
+  "topics": [
+   "family",
+   "child"
+  ],
+  "summary": "Photo of a child",
+  "has_text": false
+ },
+ {
+  "file": "momo_frame_192.jpg",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/momo_frame_192.jpg",
+  "modality": "image",
+  "doc_type": "photo",
+  "owner": "",
+  "topics": [
+   "family",
+   "child"
+  ],
+  "summary": "Photo of a child",
+  "has_text": false
+ },
+ {
+  "file": "ChatGPT Image Jul 29, 2026, 03_10_26 PM.png",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/ChatGPT Image Jul 29, 2026, 03_10_26 PM.png",
+  "modality": "image",
+  "doc_type": "",
+  "owner": "",
+  "topics": [],
+  "summary": "",
+  "has_text": false
+ },
+ {
+  "file": "rashmi_photo.jpg",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/rashmi_photo.jpg",
+  "modality": "image",
+  "doc_type": "photo",
+  "owner": "",
+  "topics": [
+   "person",
+   "image"
+  ],
+  "summary": "Rashmi photo with faces detected.",
+  "has_text": false
+ },
+ {
+  "file": "mummy.jpg",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/mummy.jpg",
+  "modality": "image",
+  "doc_type": "photo",
+  "owner": "",
+  "topics": [
+   "mummy",
+   "ancient egypt"
+  ],
+  "summary": "Image of a mummy",
+  "has_text": false
+ },
+ {
+  "file": "0460dbf563acbc2544e335093f09c644.jpg",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/0460dbf563acbc2544e335093f09c644.jpg",
+  "modality": "image",
+  "doc_type": "",
+  "owner": "",
+  "topics": [],
+  "summary": "",
+  "has_text": false
+ },
+ {
+  "file": "Wallpaper Backgrounds Radha Krishna.jpeg",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/Wallpaper Backgrounds Radha Krishna.jpeg",
+  "modality": "image",
+  "doc_type": "",
+  "owner": "",
+  "topics": [],
+  "summary": "",
+  "has_text": false
+ },
+ {
+  "file": "aae2cc56-faf8-4ba5-b652-bcbc87523e2c.png",
+  "path": "/home/rashmi/Data_Engineering/Personal Second Brain Project/watched_folder/aae2cc56-faf8-4ba5-b652-bcbc87523e2c.png",
+  "modality": "image",
+  "doc_type": "screenshot",
+  "owner": "",
+  "topics": [
+   "Apache Kafka",
+   "ETL Architecture"
+  ],
+  "summary": "Screenshot of a data engineering topic with Apache Kafka and ETL Architecture",
+  "has_text": false
+ }
+]

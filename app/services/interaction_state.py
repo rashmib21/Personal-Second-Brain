@@ -21,6 +21,7 @@ _LAST_INTERACTION_STATE = {
     "pending_spreadsheet_query": "",
     "pending_spreadsheet_candidates": [],
     "last_spreadsheet_context": {},
+    "pending_clarification": {},
     "timestamp": ""
 }
 
@@ -150,6 +151,24 @@ def get_spreadsheet_context():
     return _LAST_INTERACTION_STATE.get("last_spreadsheet_context", {}).copy()
 
 
+def set_pending_clarification(query, candidates, kind="source"):
+    """Any modality: remember the ORIGINAL question while we wait for the user to pick one of `candidates`."""
+    global _LAST_INTERACTION_STATE
+    _LAST_INTERACTION_STATE["pending_clarification"] = {
+        "query": query, "candidates": list(candidates), "kind": kind, "timestamp": str(datetime.now()),
+    }
+
+
+def get_pending_clarification():
+    global _LAST_INTERACTION_STATE
+    return dict(_LAST_INTERACTION_STATE.get("pending_clarification") or {})
+
+
+def clear_pending_clarification():
+    global _LAST_INTERACTION_STATE
+    _LAST_INTERACTION_STATE["pending_clarification"] = {}
+
+
 def clear_last_interaction():
     """
     Resets the last interaction state (useful for testing or session reset).
@@ -168,6 +187,7 @@ def clear_last_interaction():
     _LAST_INTERACTION_STATE["pending_spreadsheet_query"] = ""
     _LAST_INTERACTION_STATE["pending_spreadsheet_candidates"] = []
     _LAST_INTERACTION_STATE["last_spreadsheet_context"] = {}
+    _LAST_INTERACTION_STATE["pending_clarification"] = {}
     _LAST_INTERACTION_STATE["timestamp"] = ""
 
 
