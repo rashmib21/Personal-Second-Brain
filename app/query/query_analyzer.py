@@ -235,7 +235,13 @@ def find_best_matching_source(question_lower, indexed_files, query_modality="all
             for sub_len in range(len(stem_words), 0, -1):
                 for start_idx in range(len(stem_words) - sub_len + 1):
                     sub_phrase = " ".join(stem_words[start_idx : start_idx + sub_len])
-                    if len(sub_phrase) >= 3 and sub_phrase not in GENERIC_MEDIA_TERMS:
+                    # A phrase only identifies a FILE if it carries at least one specific word
+                    # (non-generic, >= 3 chars). 'it companies' / 'data engineering' are descriptions of
+                    # the question, not file names, unless the phrase is the WHOLE stem.
+                    _sub_words = sub_phrase.split()
+                    _has_specific_word = any(len(w) >= 3 and w not in GENERIC_MEDIA_TERMS for w in _sub_words)
+                    _is_whole_stem = sub_len == len(stem_words)
+                    if len(sub_phrase) >= 3 and sub_phrase not in GENERIC_MEDIA_TERMS and (_has_specific_word or _is_whole_stem):
                         boundary_pattern = r"\b" + re.escape(sub_phrase) + r"\b"
                         if re.search(boundary_pattern, normalized_question):
                             natural_stem_matches.append((sub_len, len(sub_phrase), candidate))
@@ -919,7 +925,14 @@ def analyze_query(question, indexed_files=None, active_file=None, request_modali
 
     explicit_filename_found = bool(file_reference_match)
 
-    if explicit_filename_found:
+    # Literal match against indexed names first: the regex above cannot see names that contain spaces.
+    _literal_hits = [f for f in indexed_files if f.lower() in question_lower]
+    if _literal_hits:
+        source_hint = max(_literal_hits, key=len)
+        source_confidence = 1.0
+        explicit_filename_found = True
+
+    if explicit_filename_found and source_hint is None:
         matched_filename = file_reference_match.group(0)
 
         for fname in indexed_files:
