@@ -326,11 +326,12 @@ class IntentRouter:
         canonical_path = None
 
         # ---------------------------------------------------------
-        # 1. Use an already-resolved spreadsheet source if present
+        # 1. Use an already-resolved spreadsheet source if present AND explicitly requested
         # ---------------------------------------------------------
         if (
             plan.source_spec.canonical_path
             and os.path.exists(plan.source_spec.canonical_path)
+            and getattr(plan.source_spec, "is_explicit", False)
         ):
             extension = os.path.splitext(
                 plan.source_spec.canonical_path
@@ -411,14 +412,25 @@ class IntentRouter:
                         canonical_path = matching[0]
 
                 if not canonical_path:
-                    from app.rag.spreadsheet_query import find_applicable_spreadsheets
+                    from app.rag.spreadsheet_query import find_applicable_spreadsheets, execute_across_spreadsheets
                     applicable = find_applicable_spreadsheets(candidates, question)
                     if len(applicable) == 1:
                         canonical_path = applicable[0]
                     elif len(applicable) > 1:
-                        candidates = applicable
+                        answer, n = execute_across_spreadsheets(applicable, question)
+                        sources_list = [os.path.basename(p) for p in applicable]
+                        update_last_interaction(question, answer, sources_list, plan.modality.value)
+                        if return_structured:
+                            return {
+                                "answer": answer,
+                                "sources": sources_list,
+                                "num_chunks": n,
+                                "type": "text",
+                                "images": []
+                            }
+                        return answer, sources_list, n
 
-                # If still ambiguous, don't randomly select a workbook.
+                # If applicable is empty / still ambiguous, ask user to specify
                 if not canonical_path:
                     names = [
                         os.path.basename(p)
@@ -432,9 +444,6 @@ class IntentRouter:
                         + ", ".join(names)
                     )
 
-                    # Remember the original structured query so that
-                    # the user's next filename reply can select the
-                    # spreadsheet and continue the original request.
                     set_pending_spreadsheet_query(
                         question,
                         candidates

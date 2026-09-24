@@ -68,6 +68,90 @@ def token_mask(series, token):
     return mask, "exact"
 
 
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+# Words that describe HOW the user asks, never WHAT they filter on. One list, used everywhere.
+REQUEST_WORDS = {
+    "provide", "give", "show", "list", "tell", "find", "get", "fetch", "display", "share", "want", "need",
+    "please", "kindly", "hey", "hi", "hello", "claude", "could", "would", "should", "let", "know", "see",
+    "name", "names", "record", "records", "row", "rows",
+    "entry", "entries", "item", "items", "file", "files", "sheet", "sheets", "spreadsheet", "workbook",
+    "table", "column", "columns", "listed", "mentioned", "available", "hiring", "hire", "hired", "hires",
+    "recruiting", "looking", "offer", "offering", "offers", "having", "opening", "openings", "vacancy",
+    "vacancies", "around", "based", "located", "situated", "working", "related", "regarding",
+}
+OPERATION_WORDS = {
+    "highest", "lowest", "top", "bottom", "rank", "ranked", "sort", "sorted", "order", "ascending",
+    "descending", "average", "avg", "mean", "sum", "total", "max", "maximum", "min", "minimum", "count",
+    "number", "best", "worst", "largest", "smallest", "cheapest", "least", "most", "per", "each", "group",
+    "grouped", "greater", "above", "below", "higher", "lower", "atleast", "atmost", "between",
+}
+# Words that can be real content ("Data Engineer") or pure filler ("show me the data"):
+# they take part in phrase matching, but are silently dropped if they cannot ground on their own.
+SOFT_WORDS = {"data", "info", "information", "detail", "details"}
+FILE_WORDS = {"xlsx", "xls", "csv", "ods", "pdf", "docx", "txt", "md"}
+FILLER = set(ENGLISH_STOP_WORDS) | REQUEST_WORDS | OPERATION_WORDS | FILE_WORDS
+
+
+def strip_file_mentions(q_norm, file_path=None):
+    """Remove file names the user typed (so 'IT_Direct_Hire_Companies_2026.xlsx' never becomes a filter)."""
+    q = re.sub(r"\S+\.(?:xlsx|xls|csv|ods)\b", " ", q_norm)
+    if file_path:
+        stem = os.path.splitext(os.path.basename(file_path))[0].lower()
+        q = q.replace(stem, " ")
+    return q
+
+
+def phrase_mask(series, tokens):
+    """Rows where `tokens` occur as a contiguous phrase inside ONE list item of a cell ('Data Engineer' != 'Data Analyst, ML Engineer')."""
+    tgt = [_canon(t) for t in tokens]
+
+    def hit(cell):
+        for seg in re.split(r"[,;|\n]", str(cell).lower()):
+            ws = [_canon(w) for w in _words(seg)]
+            for i in range(len(ws) - len(tgt) + 1):
+                if ws[i:i + len(tgt)] == tgt:
+                    return True
+        return False
+
+    return series.fillna("").astype(str).map(hit)
+
+
+def classify_words(text, headers, sheet_names):
+    """[(word, kind)] with kind in skip | header | sheet | content."""
+    h_stems = {_canon(w) for h in headers for w in _words(h)}
+    s_stems = {_canon(w) for s in sheet_names for w in _words(s)}
+    out = []
+    for w in _words(text):
+        if w in SOFT_WORDS:
+            out.append((w, "soft"))
+        elif len(w) <= 2 or w in FILLER or re.fullmatch(r"\d+(\.\d+)?", w):
+            out.append((w, "skip"))
+        elif _canon(w) in h_stems:
+            out.append((w, "header"))
+        elif _canon(w) in s_stems:
+            out.append((w, "sheet"))
+        else:
+            out.append((w, "content"))
+    return out
+
+
+def content_runs(classified):
+    """Consecutive content/soft words form one candidate phrase ('data engineer'). Runs with no hard content word are dropped."""
+    runs, cur = [], []
+    for w, kind in classified:
+        if kind in ("content", "soft"):
+            cur.append(w)
+        else:
+            if cur:
+                runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    hard = {w for w, k in classified if k == "content"}
+    return [r for r in runs if any(w in hard for w in r)]
+
+
 def parse_numeric_value(value):
     """
     Parses a cell value into float or None.
@@ -375,20 +459,8 @@ def find_applicable_spreadsheets(candidate_paths, question):
     Returns candidate paths sorted by match relevance, auto-resolving to a single workbook
     when it clearly outperforms other candidate workbooks.
     """
-    q_norm = normalize_string(question)
-    words_clean = [w for w in re.findall(r"\b[a-z0-9]+\b", q_norm)]
-    generic_terms = {
-        "how", "many", "what", "which", "who", "where", "when", "is", "are", "there", "any", "the",
-        "a", "an", "in", "on", "at", "for", "with", "from", "by", "of", "to", "this", "that", "sheet",
-        "spreadsheet", "file", "files", "workbook", "data", "table", "listed", "mentioned", "available",
-        "different", "show", "list", "give", "provide", "display", "find", "filter", "sort", "order",
-        "rank", "highest", "lowest", "top", "bottom", "all", "count", "number", "hiring", "hired",
-        "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
-        "each", "their", "where", "can", "tell", "me", "record", "records", "item", "items", "entry", "entries",
-        "company", "companies", "product", "products", "student", "students", "employee", "employees"
-    }
-
-    query_tokens = [w for w in words_clean if w not in generic_terms and len(w) > 2 and not re.fullmatch(r"\d+(\.\d+)?", w)]
+    q_norm = strip_file_mentions(normalize_string(question))
+    query_tokens = [w for w in _words(q_norm) if w not in FILLER and len(w) > 2 and not re.fullmatch(r"\d+(\.\d+)?", w)]
     if not query_tokens:
         return candidate_paths
 
@@ -409,11 +481,11 @@ def find_applicable_spreadsheets(candidate_paths, question):
             headers = schema["headers"]
 
             for token in query_tokens:
-                if re.search(r"\b" + re.escape(token) + r"\b", s_norm):
+                if _canon(token) in {_canon(w) for w in _words(s_norm)}:
                     score += 10
                     covered.add(token)
                 for col in headers:
-                    if re.search(r"\b" + re.escape(token) + r"\b", normalize_string(col)):
+                    if _canon(token) in {_canon(w) for w in _words(col)}:
                         score += 5
                         covered.add(token)
                     if schema["column_types"].get(col) == "text" and col in df.columns:
@@ -436,7 +508,9 @@ def find_applicable_spreadsheets(candidate_paths, question):
     top_score = scores[pool[0]]
 
     if best_cov > 0:
-        return [p for p in pool if (top_score - scores[p]) <= 5]
+        # Same coverage => the question fits every workbook in the pool. Raw score depends on row counts,
+        # so it must not silently eliminate a workbook. Caller answers each one (execute_across_spreadsheets).
+        return pool
     return candidate_paths
 
 
@@ -632,7 +706,7 @@ def execute_spreadsheet_query(file_path, question):
     struct_ctx = get_spreadsheet_context()
 
     # Check for Summary / Overview intent
-    is_summary_op = bool(re.search(r"\b(?:summarize|summary|overview|describe|stats|structure|details|about)\b", q_norm))
+    is_summary_op = bool(re.search(r"\b(?:summarize|summarise|summary|overview|describe|statistics|structure)\b", q_norm))
     if is_summary_op:
         return generate_spreadsheet_summary(file_path, sheets, question)
 
@@ -824,74 +898,64 @@ def execute_spreadsheet_query(file_path, question):
             if len(fn_word) > 2:
                 q_filter_text = re.sub(r"\b" + re.escape(fn_word) + r"\b", "", q_filter_text)
 
-    words_clean = [w for w in re.findall(r"\b[a-z0-9]+\b", q_filter_text)]
-    stopwords = {
-        "how", "many", "what", "which", "who", "where", "when", "is", "are", "there", "any", "the",
-        "a", "an", "in", "on", "at", "for", "with", "from", "by", "of", "to", "this", "that", "sheet",
-        "spreadsheet", "file", "files", "workbook", "data", "table", "listed", "mentioned", "available",
-        "different", "show", "list", "give", "provide", "display", "find", "filter", "sort", "order",
-        "rank", "highest", "lowest", "top", "bottom", "all", "count", "number", "hiring", "hired",
-        "row", "rows", "column", "columns", "having", "has", "have", "more", "less", "above", "below",
-        "each", "their", "where", "can", "tell", "me", "company", "companies", "product", "products",
-        "student", "students", "item", "items", "employee", "employees", "record", "records", "entry", "entries",
-        "xlsx", "xls", "csv", "ods", "pdf", "docx", "txt", "md", "total", "listed", "hiring", "roles", "role"
-    }
+    q_filter_text = strip_file_mentions(q_norm, file_path)
+    classified = classify_words(q_filter_text, headers, list(sheets.keys()))
 
-    candidate_phrases = []
-    for i in range(len(words_clean)):
-        if words_clean[i] not in stopwords and not re.fullmatch(r"\d+(\.\d+)?", words_clean[i]):
-            candidate_phrases.append(words_clean[i])
-            if i + 1 < len(words_clean) and words_clean[i+1] not in stopwords and not re.fullmatch(r"\d+(\.\d+)?", words_clean[i+1]):
-                candidate_phrases.append(f"{words_clean[i]} {words_clean[i+1]}")
-            if i + 2 < len(words_clean) and words_clean[i+2] not in stopwords and not re.fullmatch(r"\d+(\.\d+)?", words_clean[i+2]):
-                candidate_phrases.append(f"{words_clean[i]} {words_clean[i+1]} {words_clean[i+2]}")
+    matched_tokens = {}      # unit (word or phrase) -> {column: (mask, mode)}
+    soft_in_q = {w for w, k in classified if k == "soft"}
 
-    candidate_phrases = sorted(list(set(candidate_phrases)), key=len, reverse=True)
+    def column_hits(words, phrase):
+        colmap = {}
+        for col in headers:
+            if col_types.get(col) == "text" and col in df.columns:
+                if phrase:
+                    m, mode = phrase_mask(df[col], words), "phrase"
+                else:
+                    m, mode = token_mask(df[col], words[0])
+                if m.any():
+                    colmap[col] = (m, mode)
+        return colmap
 
-    matched_tokens = {}      # token -> {column: (mask, mode)}
-    for phrase in candidate_phrases:
-        if len(phrase) <= 2 or phrase in stopwords:
+    def phrase_exists_anywhere(words):
+        for d in sheets.values():
+            sdf, sch = d["df"], d["schema"]
+            for col in sch["headers"]:
+                if sch["column_types"].get(col) == "text" and col in sdf.columns and phrase_mask(sdf[col], words).any():
+                    return True
+        return False
+
+    for run in content_runs(classified):
+        candidates = [run]
+        hard_only = [w for w in run if w not in soft_in_q]
+        if hard_only != run and hard_only:
+            candidates.append(hard_only)                      # retry without soft words ('show data' filler)
+        done = False
+        for words in candidates:
+            if len(words) >= 2:
+                cm = column_hits(words, phrase=True)
+                if cm:
+                    matched_tokens[" ".join(words)] = cm
+                    done = True
+                    break
+        if done:
             continue
-
-        sheet_matched = any(re.search(r"\b" + re.escape(phrase) + r"\b", normalize_string(s)) for s in sheets.keys())
-        if sheet_matched:
-            continue
-
-        header_matched = any(re.search(r"\b" + re.escape(phrase) + r"\b", normalize_string(h)) for h in headers)
-        if header_matched:
-            continue
-
-        p_tokens = [t for t in phrase.split() if t not in stopwords and len(t) > 2 and not re.fullmatch(r"\d+(\.\d+)?", t)]
-        if not p_tokens:
-            continue
-
-        found_cell_match = False
-        for token in p_tokens:
-            token_header_match = any(re.search(r"\b" + re.escape(token) + r"\b", normalize_string(h)) for h in headers)
-            token_sheet_match = any(re.search(r"\b" + re.escape(token) + r"\b", normalize_string(s)) for s in sheets.keys())
-            if token_header_match or token_sheet_match:
-                found_cell_match = True
-                continue
-
-            for col in headers:
-                if col_types.get(col) == "text" and col in df.columns:
-                    mask, mode = token_mask(df[col], token)
-                    if mask.any():
-                        found_cell_match = True
-                        matched_tokens.setdefault(token, {})[col] = (mask, mode)
-
-        if not found_cell_match:
-            ungrounded_phrases.append(phrase)
-
-    if ungrounded_phrases:
-        missing_term = ungrounded_phrases[0]
-        return f"I can't determine that from this spreadsheet because I couldn't find a column or categorical value that represents '{missing_term}' in the workbook.", 0
+        # The phrase exists in this workbook but not inside the requested scope (e.g. 'data engineer' in Indore):
+        # the honest answer is "none". Do NOT loosen it into 'data' in one column AND 'engineer' in another.
+        if any(len(w) >= 2 and phrase_exists_anywhere(w) for w in candidates):
+            return f"No matching spreadsheet records found for '{' '.join(candidates[0])}' in {target_sheet_name}.", 0
+        for token in candidates[-1]:                          # no contiguous phrase: each word must ground alone
+            cm = column_hits([token], phrase=False)
+            if cm:
+                matched_tokens[token] = cm
+            elif token not in soft_in_q:
+                return (f"I can't determine that from this spreadsheet because I couldn't find a column or "
+                        f"categorical value that represents '{token}' in the workbook."), 0
 
     matched_columns_and_vals = [(c, t) for t, cm in matched_tokens.items() for c in cm]
-    loose_notes = sorted({t for t, cm in matched_tokens.items() if any(m == "abbrev" for _, m in cm.values())})
+    loose_notes = []
 
-    # every query word must match (AND); a word may match in any column (OR)
-    for token, colmap in matched_tokens.items():
+    # every unit must match (AND); a unit may match in any column (OR)
+    for key, colmap in matched_tokens.items():
         combined = None
         for col, (mask, mode) in colmap.items():
             combined = mask if combined is None else (combined | mask)
@@ -1066,3 +1130,21 @@ def requested_result_limit(question):
 
 def format_ranking_result(rows, question):
     return format_rows(rows)
+
+
+def execute_across_spreadsheets(paths, question):
+    """
+    Use when several workbooks tie for the same question and the user did not name one.
+    Answers each workbook that can ground the question and labels the answers by file.
+    """
+    parts, total, first_failure = [], 0, None
+    for p in paths:
+        answer, n = execute_spreadsheet_query(p, question)
+        if answer.startswith("I can't determine") or answer.startswith("Could not extract"):
+            first_failure = first_failure or answer
+            continue
+        parts.append(f"### {os.path.basename(p)}\n{answer}")
+        total += n
+    if not parts:
+        return first_failure or "No matching spreadsheet records found.", 0
+    return "\n\n".join(parts), total
