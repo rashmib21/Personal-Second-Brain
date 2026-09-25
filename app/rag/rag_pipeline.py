@@ -405,6 +405,7 @@ def ask(question, active_file=None, modality=None, return_structured=False):
     Extracts QueryPlan and dispatches execution to IntentRouter.
     Supports Mode A (Modality Chat via modality param) and Mode B (Sidebar File Chat via active_file param).
     """
+    from app.query.smalltalk import check_smalltalk_or_short_query
     from app.rag.intent_router import IntentRouter
     from app.services.face_service import register_pending_face
     from app.services.interaction_state import (
@@ -413,6 +414,19 @@ def ask(question, active_file=None, modality=None, return_structured=False):
     )
     from app.query.query_plan import Modality, RequestScope
     from app.query.query_analyzer import resolve_canonical_source_id
+
+    # Step 0: Smalltalk / Incomplete Query Early Return
+    short_reply = check_smalltalk_or_short_query(question)
+    if short_reply is not None:
+        if return_structured:
+            return {
+                "answer": short_reply,
+                "sources": [],
+                "num_chunks": 0,
+                "type": "text",
+                "images": []
+            }
+        return short_reply, [], 0
 
     question_lower = question.lower().strip()
 

@@ -17,6 +17,8 @@ def _mod(n, **kw):
 def _load():
     try:
         from app.query import query_analyzer as qa
+        import app.services.interaction_state as istate
+        istate.get_last_interaction = lambda: dict(STATE)
         return qa
     except ImportError:
         for n in ["app", "app.utils", "app.storage", "app.query", "app.search", "app.services"]:
